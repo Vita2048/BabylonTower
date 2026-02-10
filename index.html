@@ -174,7 +174,7 @@
         let allBalls = [];
 
         // Interaction
-        let dragging = false, dragGrp = null, dragStartX = 0, dragStartRot = 0;
+        let dragging = false, dragGrp = null, dragStartX = 0, dragStartRot = 0, dragDx = 0;
         let clickBall = null, clickRow = -1, clickCol = -1, hasMoved = false;
         let animLock = false;
         let gameOn = false, t0 = null, tiv = null;
@@ -201,7 +201,7 @@
             renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
             renderer.shadowMap.enabled = true;
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
-            renderer.toneMappingExposure = 1.5;
+            renderer.toneMappingExposure = 1.9;
             document.body.appendChild(renderer.domElement);
 
             orbit = new OrbitControls(camera, renderer.domElement);
@@ -212,18 +212,21 @@
             orbit.target.set(0, 0.5, 0);
 
             // Lights
-            scene.add(new THREE.AmbientLight(0xffffff, 2.8));
-            const hemi = new THREE.HemisphereLight(0xd6e2ff, 0x16161c, 1.5);
+            scene.add(new THREE.AmbientLight(0xffffff, 3.6));
+            const hemi = new THREE.HemisphereLight(0xe6eeff, 0x1a1a22, 2.0);
             scene.add(hemi);
-            const d = new THREE.DirectionalLight(0xffffff, 1.8);
+            const d = new THREE.DirectionalLight(0xffffff, 2.2);
             d.position.set(5, 12, 8); d.castShadow = true; scene.add(d);
-            const f = new THREE.DirectionalLight(0xb4c0ff, 1.1);
+            const f = new THREE.DirectionalLight(0xc6d2ff, 1.4);
             f.position.set(-7, 4, -3); scene.add(f);
-            const r2 = new THREE.DirectionalLight(0xffc48c, 1.2);
+            const r2 = new THREE.DirectionalLight(0xffd3a6, 1.6);
             r2.position.set(0, -2, 9); scene.add(r2);
-            const p = new THREE.PointLight(0xffffff, 1.4, 60);
+            const p = new THREE.PointLight(0xffffff, 2.0, 80);
             p.position.set(0, 5, 0);
             scene.add(p);
+            const p2 = new THREE.PointLight(0xffffff, 1.2, 80);
+            p2.position.set(0, 2, -6);
+            scene.add(p2);
 
             // Ground
             const gnd = new THREE.Mesh(
@@ -461,6 +464,7 @@
         function onDown(e) {
             if (animLock) return;
             dragStartX = e.clientX;
+            dragDx = 0;
             hasMoved = false;
             clickBall = null;
             dragGrp = null;
@@ -502,7 +506,8 @@
         function onMov(e) {
             if (animLock || !dragGrp) return;
             const dx = e.clientX - dragStartX;
-            if (!hasMoved && Math.abs(dx) > 5) {
+            dragDx = dx;
+            if (!hasMoved && Math.abs(dx) > 8) {
                 hasMoved = true;
                 dragging = true;
                 orbit.enabled = false;
@@ -516,7 +521,7 @@
             if (animLock) { cleanup(); return; }
 
             // CLICK → try vertical ball move
-            if (!hasMoved && clickBall) {
+            if (clickBall && Math.abs(dragDx) <= 8) {
                 if (!gameOn) startTimer();
                 tryMove(clickRow, clickCol);
             }
@@ -571,8 +576,6 @@
             if (!grid[fromR][fromC]) return false;
 
             const fromA = worldAngle(fromR, fromC);
-            const maxStep = AS * 0.62; // allow slight misalignment
-
             for (const dir of [-1, 1]) {
                 const toR = fromR + dir;
                 if (toR < 0 || toR >= ROWS) continue;
@@ -588,7 +591,7 @@
                         bestC = c;
                     }
                 }
-                if (bestC !== -1 && bestD <= maxStep) {
+                if (bestC !== -1) {
                     doMove(fromR, fromC, toR, bestC);
                     return true;
                 }
