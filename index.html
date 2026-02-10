@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Cylindrical Rotation Puzzle</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            overflow: hidden;
+            background: #0d0d0d;
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            text-align: center;
+            pointer-events: none;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
+        }
+
+        #timer {
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            font-variant-numeric: tabular-nums;
+            background: linear-gradient(135deg, #ff6b6b, #ffa500);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        #hint {
+            font-size: 13px;
+            opacity: 0.5;
+            margin-top: 6px;
+        }
+
+        #controls {
+            position: absolute;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 12px;
+        }
+
+        #controls button {
+            background: linear-gradient(135deg, #333, #222);
+            color: #eee;
+            border: 1px solid #555;
+            padding: 10px 24px;
+            cursor: pointer;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.25s;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        }
+
+        #controls button:hover {
+            background: linear-gradient(135deg, #555, #444);
+            border-color: #888;
+            transform: translateY(-1px);
+        }
+
+        #win-msg {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9);
+            color: #4ade80;
+            padding: 40px 50px;
+            border-radius: 20px;
+            text-align: center;
+            display: none;
+            pointer-events: auto;
+            border: 2px solid #4ade80;
+            box-shadow: 0 0 60px rgba(74, 222, 128, 0.3);
+        }
+
+        #win-msg h1 {
+            font-size: 42px;
+            margin-bottom: 12px;
+        }
+
+        #win-msg p {
+            font-size: 20px;
+            margin-bottom: 20px;
+            opacity: 0.8;
+        }
+
+        #win-msg button {
+            background: #4ade80;
+            color: #111;
+            border: none;
+            padding: 12px 30px;
+            cursor: pointer;
+            border-radius: 10px;
+            font-weight: 700;
+            font-size: 16px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div id="timer">00:00</div>
+        <div id="hint">Drag layers to rotate &bull; Click balls to move into empty slot</div>
+    </div>
+    <div id="win-msg">
+        <h1>&#127881; Solved!</h1>
+        <p id="final-time"></p>
+        <button onclick="resetGame()">Play Again</button>
+    </div>
+    <div id="controls">
+        <button onclick="resetGame()">New Game</button>
+    </div>
+
+    <script type="importmap">
+    { "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }}
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        /* ════════════════════════════════════════════════════
+           CONFIG
+           ════════════════════════════════════════════════════ */
+        const LAYERS = 5;           // top rotating layers
+        const SLOTS = 5;           // holes per top layer
+        const ROWS = 6;           // 5 top + 1 bottom
+        const TOTAL_HOLES = 26;     // 5*5 + 1
+        const TOTAL_BALLS = 25;     // 5 colors × 5 each
+        const COLORS = [0xe63946, 0xf4a261, 0x2a9d8f, 0x457b9d, 0xf1faee];
+        const CYL_R = 2.0;        // cylinder radius
+        const RH = 1.3;        // row height
+        const AS = Math.PI * 2 / SLOTS;  // angle step = 72°
+        const BALL_R = 0.48;
+
+        /* ════════════════════════════════════════════════════
+           STATE
+           ════════════════════════════════════════════════════ */
+        let scene, camera, renderer, orbit;
+        let groups = [];            // THREE.Group per row [0..5]
+
+        // grid[r][c] = ball mesh or null
+        // rows 0-4: indices 0..4 (5 slots each)
+        // row 5:    index 0 only (1 slot)
+        let grid = [];
+
+        // All 25 ball meshes (created once, reused)
+        let allBalls = [];
+
+        // Interaction
+        let dragging = false, dragGrp = null, dragStartX = 0, dragStartRot = 0;
+        let clickBall = null, clickRow = -1, clickCol = -1, hasMoved = false;
+        let animLock = false;
+        let gameOn = false, t0 = null, tiv = null;
+
+        /* ════════════════════════════════════════════════════
+           INIT
+           ════════════════════════════════════════════════════ */
+        initScene();
+        requestAnimationFrame(function loop() {
+            requestAnimationFrame(loop);
+            orbit.update();
+            renderer.render(scene, camera);
+        });
+
+        function initScene() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a2e);
+
+            camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+            camera.position.set(7, 5, 10);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(innerWidth, innerHeight);
+            renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+            renderer.shadowMap.enabled = true;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.2;
+            document.body.appendChild(renderer.domElement);
+
+            orbit = new OrbitControls(camera, renderer.domElement);
+            orbit.enableDamping = true;
+            orbit.dampingFactor = 0.08;
+            orbit.minDistance = 6;
+            orbit.maxDistance = 20;
+            orbit.target.set(0, 0.5, 0);
+
+            // Lights
+            scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+            const d = new THREE.DirectionalLight(0xffffff, 1.8);
+            d.position.set(5, 12, 8); d.castShadow = true; scene.add(d);
+            const f = new THREE.DirectionalLight(0x8888ff, 0.4);
+            f.position.set(-5, 3, -5); scene.add(f);
+            const r2 = new THREE.DirectionalLight(0xffaa44, 0.3);
+            r2.position.set(0, -3, 8); scene.add(r2);
+
+            // Ground
+            const gnd = new THREE.Mesh(
+                new THREE.PlaneGeometry(30, 30),
+                new THREE.MeshStandardMaterial({ color: 0x111122, roughness: 0.9 })
+            );
+            gnd.rotation.x = -Math.PI / 2;
+            gnd.position.y = -ROWS * RH / 2 - 0.5;
+            gnd.receiveShadow = true;
+            scene.add(gnd);
+
+            // Create 25 ball meshes once
+            const bGeo = new THREE.SphereGeometry(BALL_R, 32, 32);
+            allBalls = [];
+            for (let ci = 0; ci < SLOTS; ci++) {
+                for (let i = 0; i < LAYERS; i++) {
+                    const mat = new THREE.MeshStandardMaterial({
+                        color: COLORS[ci], roughness: 0.15, metalness: 0.1
+                    });
+                    const b = new THREE.Mesh(bGeo, mat);
+                    b.castShadow = true;
+                    b.userData = { type: 'ball', ci: ci };
+                    allBalls.push(b);
+                }
+            }
+
+            buildFrame();
+            scramble();
+
+            addEventListener('resize', () => {
+                camera.aspect = innerWidth / innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(innerWidth, innerHeight);
+            });
+            renderer.domElement.addEventListener('pointerdown', onDown);
+            renderer.domElement.addEventListener('pointermove', onMov);
+            addEventListener('pointerup', onUp);
+        }
+
+        /* ════════════════════════════════════════════════════
+           BUILD FRAME (geometry only, no balls)
+           ════════════════════════════════════════════════════ */
+        function buildFrame() {
+            groups.forEach(g => scene.remove(g));
+            groups = [];
+
+            const fm = new THREE.MeshStandardMaterial({
+                color: 0x111111, roughness: 0.25, metalness: 0.6
+            });
+
+            for (let r = 0; r < ROWS; r++) {
+                const g = new THREE.Group();
+                g.position.y = ((ROWS - 1) / 2 - r) * RH;
+                g.userData = { ri: r, snap: 0 };
+                scene.add(g);
+                groups.push(g);
+
+                if (r < LAYERS) {
+                    // ── Top 5 layers: open cylinder with 5 windows ──
+                    const cyl = new THREE.Mesh(
+                        new THREE.CylinderGeometry(CYL_R + 0.15, CYL_R + 0.15, RH * 0.92, 40, 1, true),
+                        fm
+                    );
+                    g.add(cyl);
+
+                    // 5 dividers between windows
+                    for (let c = 0; c < SLOTS; c++) {
+                        const a = (c + 0.5) * AS;
+                        const dv = new THREE.Mesh(new THREE.BoxGeometry(0.18, RH * 0.94, 0.35), fm);
+                        dv.position.set(Math.cos(a) * CYL_R, 0, Math.sin(a) * CYL_R);
+                        dv.rotation.y = -a;
+                        g.add(dv);
+                    }
+                } else {
+                    // ── Bottom layer: fully closed cylinder, no window ──
+                    // Ball pokes through the surface creating a natural hole appearance
+                    const cyl = new THREE.Mesh(
+                        new THREE.CylinderGeometry(CYL_R + 0.15, CYL_R + 0.15, RH * 0.92, 40, 1, true),
+                        fm
+                    );
+                    g.add(cyl);
+                }
+
+                // Top cap on first row
+                if (r === 0) {
+                    const cap = new THREE.Mesh(
+                        new THREE.CylinderGeometry(CYL_R + 0.2, CYL_R + 0.2, 0.15, 40), fm
+                    );
+                    cap.position.y = RH / 2;
+                    g.add(cap);
+                }
+                // Bottom cap on last row
+                if (r === ROWS - 1) {
+                    const cap = new THREE.Mesh(
+                        new THREE.CylinderGeometry(CYL_R + 0.2, CYL_R + 0.2, 0.15, 40), fm
+                    );
+                    cap.position.y = -RH / 2;
+                    g.add(cap);
+                }
+
+                // Separator rings between rows
+                if (r < ROWS - 1) {
+                    const ring = new THREE.Mesh(
+                        new THREE.TorusGeometry(CYL_R + 0.12, 0.06, 8, 40), fm
+                    );
+                    ring.rotation.x = Math.PI / 2;
+                    ring.position.y = -RH / 2;
+                    g.add(ring);
+                }
+            }
+        }
+
+        /* ════════════════════════════════════════════════════
+           SCRAMBLE — shuffle 25 balls into 26 holes randomly
+           ════════════════════════════════════════════════════ */
+        function scramble() {
+            // Remove all balls from scene
+            allBalls.forEach(b => { if (b.parent) b.parent.remove(b); });
+
+            // Reset grid
+            grid = [];
+            for (let r = 0; r < ROWS; r++) grid.push(new Array(SLOTS).fill(null));
+
+            // Build list of all 26 hole positions: {row, col}
+            const holes = [];
+            for (let r = 0; r < LAYERS; r++)
+                for (let c = 0; c < SLOTS; c++)
+                    holes.push({ r, c });
+            holes.push({ r: 5, c: 0 }); // bottom slot
+
+            // Shuffle holes (Fisher-Yates)
+            for (let i = holes.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [holes[i], holes[j]] = [holes[j], holes[i]];
+            }
+
+            // First 25 holes get balls, last hole stays empty
+            for (let i = 0; i < TOTAL_BALLS; i++) {
+                const h = holes[i];
+                const ball = allBalls[i];
+                grid[h.r][h.c] = ball;
+            }
+            // holes[25] is the empty hole — grid stays null there
+
+            // Randomize each top layer rotation (discrete steps)
+            for (let r = 0; r < LAYERS; r++) {
+                const steps = Math.floor(Math.random() * SLOTS);
+                const rot = steps * AS;
+                groups[r].rotation.y = rot;
+                groups[r].userData.snap = rot;
+            }
+            // Bottom layer never rotates
+            groups[5].rotation.y = 0;
+            groups[5].userData.snap = 0;
+
+            // Place ball meshes into their layer groups
+            syncVisuals();
+        }
+
+        /* ════════════════════════════════════════════════════
+           SYNC VISUALS — put ball meshes at correct positions
+           ════════════════════════════════════════════════════ */
+        function syncVisuals() {
+            // Remove all balls from all groups first
+            allBalls.forEach(b => { if (b.parent) b.parent.remove(b); });
+
+            for (let r = 0; r < ROWS; r++) {
+                const maxC = (r === ROWS - 1) ? 1 : SLOTS;
+                for (let c = 0; c < maxC; c++) {
+                    const ball = grid[r][c];
+                    if (!ball) continue;
+                    const a = c * AS;
+                    ball.position.set(Math.cos(a) * CYL_R, 0, Math.sin(a) * CYL_R);
+                    groups[r].add(ball);
+                }
+            }
+        }
+
+        /* ════════════════════════════════════════════════════
+           ALIGNMENT CHECK
+           ════════════════════════════════════════════════════ */
+        function aligned(r1, c1, r2, c2) {
+            const a1 = c1 * AS + groups[r1].rotation.y;
+            const a2 = c2 * AS + groups[r2].rotation.y;
+            let d = a1 - a2;
+            while (d > Math.PI) d -= Math.PI * 2;
+            while (d < -Math.PI) d += Math.PI * 2;
+            return Math.abs(d) < 0.3;
+        }
+
+        /* ════════════════════════════════════════════════════
+           POINTER EVENTS
+           ════════════════════════════════════════════════════ */
+        function onDown(e) {
+            if (animLock) return;
+            dragStartX = e.clientX;
+            hasMoved = false;
+            clickBall = null;
+            dragGrp = null;
+
+            const mouse = new THREE.Vector2(
+                (e.clientX / innerWidth) * 2 - 1,
+                -(e.clientY / innerHeight) * 2 + 1
+            );
+            const rc = new THREE.Raycaster();
+            rc.setFromCamera(mouse, camera);
+            const hits = rc.intersectObjects(scene.children, true);
+            if (!hits.length) return;
+
+            const hit = hits[0].object;
+            let grp = hit;
+            while (grp && !groups.includes(grp)) grp = grp.parent;
+            if (!grp) return;
+
+            const ri = grp.userData.ri;
+
+            // Remember clicked ball
+            if (hit.userData.type === 'ball') {
+                const col = gridCol(ri, hit);
+                if (col !== -1) {
+                    clickBall = hit;
+                    clickRow = ri;
+                    clickCol = col;
+                }
+            }
+
+            // Prepare drag for top 5 layers only
+            if (ri < LAYERS) {
+                dragGrp = grp;
+                dragStartRot = grp.rotation.y;
+            }
+        }
+
+        function onMov(e) {
+            if (animLock || !dragGrp) return;
+            const dx = e.clientX - dragStartX;
+            if (!hasMoved && Math.abs(dx) > 5) {
+                hasMoved = true;
+                dragging = true;
+                orbit.enabled = false;
+            }
+            if (dragging) {
+                dragGrp.rotation.y = dragStartRot + dx * 0.008;
+            }
+        }
+
+        function onUp() {
+            if (animLock) { cleanup(); return; }
+
+            // CLICK → try vertical ball move
+            if (!hasMoved && clickBall) {
+                if (!gameOn) startTimer();
+                tryMove(clickRow, clickCol);
+            }
+
+            // DRAG → snap rotation
+            if (dragging && dragGrp) {
+                if (!gameOn) startTimer();
+                const layer = dragGrp;  // capture before cleanup
+                const cur = layer.rotation.y;
+                const snp = Math.round(cur / AS) * AS;
+
+                animLock = true;
+                const startT = performance.now();
+                (function tick(now) {
+                    const t = Math.min(1, (now - startT) / 180);
+                    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                    layer.rotation.y = cur + (snp - cur) * ease;
+                    if (t < 1) {
+                        requestAnimationFrame(tick);
+                    } else {
+                        layer.rotation.y = snp;
+                        layer.userData.snap = snp;
+                        animLock = false;
+                        checkWin();
+                    }
+                })(performance.now());
+            }
+
+            cleanup();
+        }
+
+        function cleanup() {
+            dragging = false;
+            dragGrp = null;
+            clickBall = null;
+            hasMoved = false;
+            orbit.enabled = true;
+        }
+
+        /* ════════════════════════════════════════════════════
+           BALL MOVEMENT
+           ════════════════════════════════════════════════════ */
+        function gridCol(row, mesh) {
+            const maxC = (row === ROWS - 1) ? 1 : SLOTS;
+            for (let c = 0; c < maxC; c++) {
+                if (grid[row][c] === mesh) return c;
+            }
+            return -1;
+        }
+
+        function tryMove(fromR, fromC) {
+            if (!grid[fromR][fromC]) return false;
+
+            for (const dir of [-1, 1]) {
+                const toR = fromR + dir;
+                if (toR < 0 || toR >= ROWS) continue;
+
+                const maxC = (toR === ROWS - 1) ? 1 : SLOTS;
+                for (let c = 0; c < maxC; c++) {
+                    if (grid[toR][c] !== null) continue; // not empty
+                    if (aligned(fromR, fromC, toR, c)) {
+                        doMove(fromR, fromC, toR, c);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function doMove(fr, fc, tr, tc) {
+            const ball = grid[fr][fc];
+
+            // Reparent ball to target layer
+            groups[fr].remove(ball);
+            const a = tc * AS;
+            ball.position.set(Math.cos(a) * CYL_R, 0, Math.sin(a) * CYL_R);
+            groups[tr].add(ball);
+
+            // Update grid
+            grid[tr][tc] = ball;
+            grid[fr][fc] = null;
+
+            checkWin();
+        }
+
+        /* ════════════════════════════════════════════════════
+           WIN CHECK
+           ════════════════════════════════════════════════════ */
+        function checkWin() {
+            if (!gameOn) return;
+
+            // Group balls by world-space column index
+            const cols = Array.from({ length: SLOTS }, () => []);
+
+            for (let r = 0; r < ROWS; r++) {
+                const maxC = (r === ROWS - 1) ? 1 : SLOTS;
+                for (let c = 0; c < maxC; c++) {
+                    const b = grid[r][c];
+                    if (!b) continue;
+                    let wa = c * AS + groups[r].rotation.y;
+                    wa = ((wa % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+                    const wc = Math.round(wa / AS) % SLOTS;
+                    cols[wc].push(b.userData.ci);
+                }
+            }
+
+            // Each world column must have same color
+            let total = 0;
+            for (const col of cols) {
+                total += col.length;
+                if (col.length > 0 && !col.every(v => v === col[0])) return;
+            }
+            if (total !== TOTAL_BALLS) return;
+
+            // Win!
+            gameOn = false;
+            clearInterval(tiv);
+            document.getElementById('final-time').innerText =
+                'Time: ' + document.getElementById('timer').innerText;
+            document.getElementById('win-msg').style.display = 'block';
+        }
+
+        /* ════════════════════════════════════════════════════
+           TIMER
+           ════════════════════════════════════════════════════ */
+        function startTimer() {
+            if (gameOn) return;
+            gameOn = true;
+            t0 = Date.now();
+            tiv = setInterval(() => {
+                const d = Math.floor((Date.now() - t0) / 1000);
+                document.getElementById('timer').innerText =
+                    String(Math.floor(d / 60)).padStart(2, '0') + ':' +
+                    String(d % 60).padStart(2, '0');
+            }, 1000);
+        }
+
+        /* ════════════════════════════════════════════════════
+           RESET
+           ════════════════════════════════════════════════════ */
+        window.resetGame = function () {
+            scramble();
+            gameOn = false;
+            animLock = false;
+            if (tiv) clearInterval(tiv);
+            document.getElementById('timer').innerText = '00:00';
+            document.getElementById('win-msg').style.display = 'none';
+        };
+
+        // Auto-start on load
+        setTimeout(() => resetGame(), 300);
+    </script>
+</body>
+
+</html>
