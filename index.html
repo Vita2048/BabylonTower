@@ -155,6 +155,8 @@
         const RH = 1.3;        // row height
         const AS = Math.PI * 2 / SLOTS;  // angle step = 72°
         const BALL_R = 0.48;
+        const HOLE_R = BALL_R * 1.08;
+        const HOLE_DEPTH = 0.08;
 
         /* ════════════════════════════════════════════════════
            STATE
@@ -209,12 +211,12 @@
             orbit.target.set(0, 0.5, 0);
 
             // Lights
-            scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+            scene.add(new THREE.AmbientLight(0xffffff, 1.0));
             const d = new THREE.DirectionalLight(0xffffff, 1.8);
             d.position.set(5, 12, 8); d.castShadow = true; scene.add(d);
-            const f = new THREE.DirectionalLight(0x8888ff, 0.4);
-            f.position.set(-5, 3, -5); scene.add(f);
-            const r2 = new THREE.DirectionalLight(0xffaa44, 0.3);
+            const f = new THREE.DirectionalLight(0x8888ff, 1.0);
+            f.position.set(-5, 3, -2); scene.add(f);
+            const r2 = new THREE.DirectionalLight(0xffaa44, 1.3);
             r2.position.set(0, -3, 8); scene.add(r2);
 
             // Ground
@@ -265,6 +267,15 @@
             const fm = new THREE.MeshStandardMaterial({
                 color: 0x111111, roughness: 0.25, metalness: 0.6
             });
+            const holeMat = new THREE.MeshStandardMaterial({
+                color: 0x050505,
+                roughness: 1.0,
+                metalness: 0.0,
+                side: THREE.DoubleSide,
+                polygonOffset: true,
+                polygonOffsetFactor: 1,
+                polygonOffsetUnits: 1
+            });
 
             for (let r = 0; r < ROWS; r++) {
                 const g = new THREE.Group();
@@ -273,15 +284,15 @@
                 scene.add(g);
                 groups.push(g);
 
-                if (r < LAYERS) {
-                    // ── Top 5 layers: open cylinder with 5 windows ──
-                    const cyl = new THREE.Mesh(
-                        new THREE.CylinderGeometry(CYL_R + 0.15, CYL_R + 0.15, RH * 0.92, 40, 1, true),
-                        fm
-                    );
-                    g.add(cyl);
+                // Outer shell
+                const cyl = new THREE.Mesh(
+                    new THREE.CylinderGeometry(CYL_R + 0.15, CYL_R + 0.15, RH * 0.92, 40, 1, true),
+                    fm
+                );
+                g.add(cyl);
 
-                    // 5 dividers between windows
+                // 5 dividers between windows (top 5 layers only)
+                if (r < LAYERS) {
                     for (let c = 0; c < SLOTS; c++) {
                         const a = (c + 0.5) * AS;
                         const dv = new THREE.Mesh(new THREE.BoxGeometry(0.18, RH * 0.94, 0.35), fm);
@@ -289,14 +300,6 @@
                         dv.rotation.y = -a;
                         g.add(dv);
                     }
-                } else {
-                    // ── Bottom layer: fully closed cylinder, no window ──
-                    // Ball pokes through the surface creating a natural hole appearance
-                    const cyl = new THREE.Mesh(
-                        new THREE.CylinderGeometry(CYL_R + 0.15, CYL_R + 0.15, RH * 0.92, 40, 1, true),
-                        fm
-                    );
-                    g.add(cyl);
                 }
 
                 // Top cap on first row
@@ -324,6 +327,30 @@
                     ring.rotation.x = Math.PI / 2;
                     ring.position.y = -RH / 2;
                     g.add(ring);
+                }
+
+                // Hole visuals (top 5 layers = 5 holes, bottom = 1 hole)
+                const holeCount = (r < LAYERS) ? SLOTS : 1;
+                for (let c = 0; c < holeCount; c++) {
+                    const a = c * AS;
+                    const hole = new THREE.Group();
+
+                    const disk = new THREE.Mesh(new THREE.CircleGeometry(HOLE_R, 24), holeMat);
+                    disk.rotation.y = Math.PI / 2;
+                    disk.position.x = 0.003;
+                    hole.add(disk);
+
+                    const tunnel = new THREE.Mesh(
+                        new THREE.CylinderGeometry(HOLE_R * 0.98, HOLE_R * 0.98, HOLE_DEPTH, 24),
+                        holeMat
+                    );
+                    tunnel.rotation.z = Math.PI / 2;
+                    tunnel.position.x = -HOLE_DEPTH * 0.5;
+                    hole.add(tunnel);
+
+                    hole.rotation.y = -a;
+                    hole.position.set(Math.cos(a) * (CYL_R + 0.152), 0, Math.sin(a) * (CYL_R + 0.152));
+                    g.add(hole);
                 }
             }
         }
@@ -360,16 +387,13 @@
             }
             // holes[25] is the empty hole — grid stays null there
 
-            // Randomize each top layer rotation (discrete steps)
-            for (let r = 0; r < LAYERS; r++) {
+            // Randomize each layer rotation (discrete steps)
+            for (let r = 0; r < ROWS; r++) {
                 const steps = Math.floor(Math.random() * SLOTS);
                 const rot = steps * AS;
                 groups[r].rotation.y = rot;
                 groups[r].userData.snap = rot;
             }
-            // Bottom layer never rotates
-            groups[5].rotation.y = 0;
-            groups[5].userData.snap = 0;
 
             // Place ball meshes into their layer groups
             syncVisuals();
@@ -442,8 +466,8 @@
                 }
             }
 
-            // Prepare drag for top 5 layers only
-            if (ri < LAYERS) {
+            // Prepare drag for all layers
+            if (ri < ROWS) {
                 dragGrp = grp;
                 dragStartRot = grp.rotation.y;
             }
