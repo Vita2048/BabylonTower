@@ -77,6 +77,15 @@
             transform: translateY(-1px);
         }
 
+        #solve-btn {
+            background: linear-gradient(135deg, #2a5d3f, #1a3d2f);
+            border-color: #4ade80;
+        }
+
+        #solve-btn:hover {
+            background: linear-gradient(135deg, #3a7d5f, #2a5d4f);
+        }
+
         #win-msg {
             position: absolute;
             top: 50%;
@@ -129,6 +138,7 @@
     </div>
     <div id="controls">
         <button onclick="resetGame()">New Game</button>
+        <button id="solve-btn" onclick="toggleSolve()">Solve</button>
     </div>
 
     <script type="importmap">
@@ -150,7 +160,13 @@
         const ROWS = 6;           // 5 top + 1 bottom
         const TOTAL_HOLES = 26;     // 5*5 + 1
         const TOTAL_BALLS = 25;     // 5 colors × 5 each
-        const COLORS = [0xe63946, 0xf4a261, 0x2a9d8f, 0x457b9d, 0xf1faee];
+        const COLORS = [
+            0xee2222, // Vivid Red
+            0x22cc22, // Bright Green
+            0x2266ff, // Deep Blue
+            0xffd300, // Golden Yellow
+            0xffffff  // Pure White
+        ];
         const CYL_R = 2.0;        // cylinder radius
         const RH = 1.3;        // row height
         const AS = Math.PI * 2 / SLOTS;  // angle step = 72°
@@ -191,7 +207,7 @@
 
         function initScene() {
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x1a1a2e);
+            scene.background = new THREE.Color(0x0a0a12);
 
             camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
             camera.position.set(7, 5, 10);
@@ -201,7 +217,7 @@
             renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
             renderer.shadowMap.enabled = true;
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
-            renderer.toneMappingExposure = 1.9;
+            renderer.toneMappingExposure = 1.5;
             document.body.appendChild(renderer.domElement);
 
             orbit = new OrbitControls(camera, renderer.domElement);
@@ -212,26 +228,26 @@
             orbit.target.set(0, 0.5, 0);
 
             // Lights
-            scene.add(new THREE.AmbientLight(0xffffff, 3.6));
-            const hemi = new THREE.HemisphereLight(0xe6eeff, 0x1a1a22, 2.0);
+            scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+            const hemi = new THREE.HemisphereLight(0xe6eeff, 0x1a1a22, 1.0);
             scene.add(hemi);
-            const d = new THREE.DirectionalLight(0xffffff, 2.2);
+            const d = new THREE.DirectionalLight(0xffffff, 2.5);
             d.position.set(5, 12, 8); d.castShadow = true; scene.add(d);
-            const f = new THREE.DirectionalLight(0xc6d2ff, 1.4);
+            const f = new THREE.DirectionalLight(0xc6d2ff, 1.5);
             f.position.set(-7, 4, -3); scene.add(f);
-            const r2 = new THREE.DirectionalLight(0xffd3a6, 1.6);
+            const r2 = new THREE.DirectionalLight(0xffd3a6, 1.8);
             r2.position.set(0, -2, 9); scene.add(r2);
-            const p = new THREE.PointLight(0xffffff, 2.0, 80);
+            const p = new THREE.PointLight(0xffffff, 2.5, 80);
             p.position.set(0, 5, 0);
             scene.add(p);
-            const p2 = new THREE.PointLight(0xffffff, 1.2, 80);
+            const p2 = new THREE.PointLight(0xffffff, 1.5, 80);
             p2.position.set(0, 2, -6);
             scene.add(p2);
 
             // Ground
             const gnd = new THREE.Mesh(
                 new THREE.PlaneGeometry(30, 30),
-                new THREE.MeshStandardMaterial({ color: 0x111122, roughness: 0.9 })
+                new THREE.MeshStandardMaterial({ color: 0x080810, roughness: 0.9 })
             );
             gnd.rotation.x = -Math.PI / 2;
             gnd.position.y = -ROWS * RH / 2 - 0.5;
@@ -244,7 +260,7 @@
             for (let ci = 0; ci < SLOTS; ci++) {
                 for (let i = 0; i < LAYERS; i++) {
                     const mat = new THREE.MeshStandardMaterial({
-                        color: COLORS[ci], roughness: 0.15, metalness: 0.1
+                        color: COLORS[ci], roughness: 0.1, metalness: 0.3
                     });
                     const b = new THREE.Mesh(bGeo, mat);
                     b.castShadow = true;
@@ -599,7 +615,7 @@
             return false;
         }
 
-        function doMove(fr, fc, tr, tc) {
+        function doMove(fr, fc, tr, tc, skipWinCheck) {
             const ball = grid[fr][fc];
 
             // Reparent ball to target layer
@@ -612,7 +628,7 @@
             grid[tr][tc] = ball;
             grid[fr][fc] = null;
 
-            checkWin();
+            if (!skipWinCheck) checkWin();
         }
 
         /* ════════════════════════════════════════════════════
@@ -671,13 +687,397 @@
            RESET
            ════════════════════════════════════════════════════ */
         window.resetGame = function () {
+            if (solving) { solveAbort = true; solving = false; }
             scramble();
             gameOn = false;
             animLock = false;
             if (tiv) clearInterval(tiv);
             document.getElementById('timer').innerText = '00:00';
             document.getElementById('win-msg').style.display = 'none';
+            document.getElementById('solve-btn').textContent = 'Solve';
         };
+
+        /* ════════════════════════════════════════════════════
+           SOLVER
+           ════════════════════════════════════════════════════ */
+        let solving = false;
+        let solveAbort = false;
+
+        window.toggleSolve = function () {
+            if (solving) {
+                solveAbort = true;
+                return;
+            }
+            solveAbort = false;
+            solving = true;
+            animLock = true;
+            document.getElementById('solve-btn').textContent = 'Stop';
+            if (!gameOn) startTimer();
+            runSolver();
+        };
+
+        function stopSolve() {
+            solving = false;
+            solveAbort = false;
+            animLock = false;
+            document.getElementById('solve-btn').textContent = 'Solve';
+        }
+
+        /*  ── World-space state for solver ──
+            w[r][wc] = color (0-4) or -1 (empty)
+            Row 0-4: 5 world-columns each.  Row 5: only wc that the bottom slot maps to is valid; rest are -2 (blocked).
+        */
+        function snapshotWorld() {
+            const w = [];
+            for (let r = 0; r < ROWS; r++) {
+                const row = new Array(SLOTS).fill(-2);
+                const maxC = (r === ROWS - 1) ? 1 : SLOTS;
+                const rotSteps = Math.round(groups[r].rotation.y / AS);
+                for (let c = 0; c < maxC; c++) {
+                    const wc = (((c + rotSteps) % SLOTS) + SLOTS) % SLOTS;
+                    row[wc] = grid[r][c] ? grid[r][c].userData.ci : -1;
+                }
+                w.push(row);
+            }
+            return w;
+        }
+
+        function wClone(w) { return w.map(r => r.slice()); }
+
+        function wHash(w) {
+            let s = '';
+            for (let r = 0; r < ROWS; r++)
+                for (let wc = 0; wc < SLOTS; wc++)
+                    s += String.fromCharCode(w[r][wc] + 50);
+            return s;
+        }
+
+        function wFindEmpty(w) {
+            for (let r = 0; r < ROWS; r++)
+                for (let wc = 0; wc < SLOTS; wc++)
+                    if (w[r][wc] === -1) return { r, wc };
+            return null;
+        }
+
+        function wRotate(w, row, steps) {
+            const nw = wClone(w);
+            const old = w[row];
+            for (let c = 0; c < SLOTS; c++)
+                nw[row][(((c + steps) % SLOTS) + SLOTS) % SLOTS] = old[c];
+            return nw;
+        }
+
+        function wSwap(w, r1, c1, r2, c2) {
+            const nw = wClone(w);
+            nw[r1][c1] = w[r2][c2];
+            nw[r2][c2] = w[r1][c1];
+            return nw;
+        }
+
+        function wIsSolved(w) {
+            for (let wc = 0; wc < SLOTS; wc++) {
+                const c0 = w[0][wc];
+                if (c0 < 0) return false;
+                for (let r = 1; r < LAYERS; r++)
+                    if (w[r][wc] !== c0) return false;
+            }
+            return true;
+        }
+
+        function wHeuristic(w) {
+            const count = Array.from({ length: SLOTS }, () => new Array(SLOTS).fill(0));
+            for (let r = 0; r < LAYERS; r++)
+                for (let wc = 0; wc < SLOTS; wc++) {
+                    const v = w[r][wc];
+                    if (v >= 0) count[wc][v]++;
+                }
+            let best = 0;
+            const p = [0, 1, 2, 3, 4];
+            (function go(l) {
+                if (l === 5) {
+                    let m = 0;
+                    for (let i = 0; i < 5; i++) m += count[p[i]][i];
+                    if (m > best) best = m;
+                    return;
+                }
+                for (let i = l; i < 5; i++) {
+                    [p[l], p[i]] = [p[i], p[l]];
+                    go(l + 1);
+                    [p[l], p[i]] = [p[i], p[l]];
+                }
+            })(0);
+            return TOTAL_BALLS - best;
+        }
+
+        function wGenMoves(w) {
+            const moves = [];
+            const e = wFindEmpty(w);
+            if (!e) return moves;
+
+            // Vertical: swap empty with ball above/below if same world-column
+            for (const dir of [-1, 1]) {
+                const nr = e.r + dir;
+                if (nr < 0 || nr >= ROWS) continue;
+                if (w[nr][e.wc] >= 0)
+                    moves.push({ type: 'move', fromR: nr, fromWC: e.wc, toR: e.r, toWC: e.wc });
+            }
+
+            // Rotate any of the 5 top layers by ±1 or ±2 steps
+            for (let row = 0; row < LAYERS; row++)
+                for (const steps of [1, -1, 2, -2])
+                    moves.push({ type: 'rotate', row, steps });
+
+            return moves;
+        }
+
+        function wApply(w, move) {
+            if (move.type === 'rotate')
+                return wRotate(w, move.row, move.steps);
+            return wSwap(w, move.fromR, move.fromWC, move.toR, move.toWC);
+        }
+
+        // Async greedy solver with multi-restart and random plateau escape
+        async function solve(w0) {
+            if (wIsSolved(w0)) return [];
+            const MAX_STEPS = 8000;
+            const MAX_ATTEMPTS = 10;
+
+            for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+                if (solveAbort) return null;
+                let w = wClone(w0);
+                const moves = [];
+                const seen = new Set();
+                seen.add(wHash(w));
+                let stuckCount = 0;
+
+                for (let step = 0; step < MAX_STEPS; step++) {
+                    if (solveAbort) return null;
+                    // yield every 200 steps so browser stays responsive
+                    if (step % 200 === 0)
+                        await new Promise(r => setTimeout(r, 0));
+
+                    if (wIsSolved(w)) return moves;
+
+                    const legal = wGenMoves(w);
+                    const candidates = [];
+                    for (const mv of legal) {
+                        // prune immediate inverse
+                        if (moves.length > 0) {
+                            const last = moves[moves.length - 1];
+                            if (mv.type === 'rotate' && last.type === 'rotate' &&
+                                mv.row === last.row && mv.steps === -last.steps) continue;
+                            if (mv.type === 'move' && last.type === 'move' &&
+                                mv.fromR === last.toR && mv.fromWC === last.toWC &&
+                                mv.toR === last.fromR && mv.toWC === last.fromWC) continue;
+                        }
+                        const nw = wApply(w, mv);
+                        const h = wHeuristic(nw);
+                        const hsh = wHash(nw);
+                        const penalty = seen.has(hsh) ? 3 : 0;
+                        candidates.push({ mv, nw, h: h + penalty, hsh });
+                    }
+                    if (candidates.length === 0) break;
+
+                    candidates.sort((a, b) => a.h - b.h);
+
+                    // Pick best, but use randomness to escape plateaus
+                    let pickRange = 1;
+                    if (stuckCount > 10) pickRange = Math.min(candidates.length, 5);
+                    if (stuckCount > 30) pickRange = Math.min(candidates.length, 8);
+                    const idx = pickRange > 1 ? Math.floor(Math.random() * pickRange) : 0;
+                    const pick = candidates[idx];
+
+                    const prevH = wHeuristic(w);
+                    if (pick.h >= prevH) stuckCount++;
+                    else stuckCount = 0;
+
+                    moves.push(pick.mv);
+                    w = pick.nw;
+                    seen.add(pick.hsh);
+
+                    // If stuck too long, restart
+                    if (stuckCount > 80) break;
+                }
+                if (wIsSolved(w)) return moves;
+            }
+            return null;
+        }
+
+        // Convert ONE world-space move to game move using live game state
+        function worldMoveToGameMove(mv) {
+            if (mv.type === 'rotate')
+                return { type: 'rotate', row: mv.row, steps: mv.steps };
+            // World col → local col using actual current group rotation
+            function wcToLocal(row, wc) {
+                const rotSteps = Math.round(groups[row].rotation.y / AS);
+                return (((wc - rotSteps) % SLOTS) + SLOTS) % SLOTS;
+            }
+            return {
+                type: 'move',
+                fromR: mv.fromR, fromC: wcToLocal(mv.fromR, mv.fromWC),
+                toR: mv.toR, toC: wcToLocal(mv.toR, mv.toWC)
+            };
+        }
+
+        /* --- Animate solution --- */
+        async function runSolver() {
+            document.getElementById('solve-btn').textContent = 'Computing…';
+            await new Promise(r => setTimeout(r, 30));
+
+            const w0 = snapshotWorld();
+            const solution = await solve(w0);
+
+            if (solveAbort) { stopSolve(); return; }
+
+            if (!solution || solution.length === 0) {
+                stopSolve();
+                return;
+            }
+
+            document.getElementById('solve-btn').textContent = 'Stop';
+
+            for (let i = 0; i < solution.length; i++) {
+                if (solveAbort) { stopSolve(); return; }
+                // Convert each move live against actual game state
+                const gm = worldMoveToGameMove(solution[i]);
+                await animateMove(gm);
+                if (solveAbort) { stopSolve(); return; }
+            }
+
+            checkWin();
+            stopSolve();
+        }
+
+        // Find the world-space angle of the empty hole (searches all rows)
+        function findEmptyWorldAngle() {
+            for (let r = 0; r < ROWS; r++) {
+                const maxC = (r === ROWS - 1) ? 1 : SLOTS;
+                for (let c = 0; c < maxC; c++) {
+                    if (grid[r][c] === null) {
+                        return { angle: worldAngle(r, c), row: r };
+                    }
+                }
+            }
+            return null;
+        }
+
+        function animateMove(move) {
+            return new Promise(resolve => {
+                // Always point camera at the empty hole before every move
+                const empty = findEmptyWorldAngle();
+                if (!empty) { resolve(); return; }
+                pointCameraAt(empty.angle, empty.row, () => {
+                    if (move.type === 'rotate') {
+                        doAnimatedRotation(move.row, move.steps, resolve);
+                    } else {
+                        doAnimatedBallMove(move.fromR, move.fromC, move.toR, move.toC, resolve);
+                    }
+                });
+            });
+        }
+
+        // Animate ball sliding straight up or down into the empty hole
+        function doAnimatedBallMove(fr, fc, tr, tc, callback) {
+            const ball = grid[fr][fc];
+            if (!ball) { callback(); return; }
+
+            // Force matrix updates so world positions are current
+            scene.updateMatrixWorld(true);
+
+            const srcGroup = groups[fr];
+            const dstGroup = groups[tr];
+
+            // Ball's current world position (from its actual mesh position)
+            const srcWorld = new THREE.Vector3();
+            ball.getWorldPosition(srcWorld);
+
+            // Destination world position
+            const dstLocal = new THREE.Vector3(
+                Math.cos(tc * AS) * CYL_R, 0, Math.sin(tc * AS) * CYL_R
+            );
+            const dstWorld = dstLocal.clone().applyMatrix4(dstGroup.matrixWorld);
+
+            // Reparent ball to scene root for cross-group animation
+            srcGroup.remove(ball);
+            ball.position.copy(srcWorld);
+            scene.add(ball);
+
+            // Straight line from src to dst (ball moves purely up/down along the cylinder surface)
+            const duration = 400;
+            const startT = performance.now();
+            (function tick(now) {
+                const t = Math.min(1, (now - startT) / duration);
+                const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                ball.position.lerpVectors(srcWorld, dstWorld, ease);
+                if (t < 1) {
+                    requestAnimationFrame(tick);
+                } else {
+                    // Finalize: reparent into destination group
+                    scene.remove(ball);
+                    ball.position.copy(dstLocal);
+                    dstGroup.add(ball);
+                    grid[tr][tc] = ball;
+                    grid[fr][fc] = null;
+                    callback();
+                }
+            })(performance.now());
+        }
+
+        function doAnimatedRotation(row, steps, callback) {
+            const layer = groups[row];
+            const startRot = layer.rotation.y;
+            const endRot = startRot + steps * AS;
+            const duration = 300;
+            const startT = performance.now();
+            (function tick(now) {
+                const t = Math.min(1, (now - startT) / duration);
+                const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                layer.rotation.y = startRot + (endRot - startRot) * ease;
+                if (t < 1) {
+                    requestAnimationFrame(tick);
+                } else {
+                    layer.rotation.y = endRot;
+                    layer.userData.snap = endRot;
+                    callback();
+                }
+            })(performance.now());
+        }
+
+        // Smoothly orbit camera so the given world angle faces the viewer
+        function pointCameraAt(angle, row, callback) {
+            const targetY = ((ROWS - 1) / 2 - row) * RH;
+            const curAngle = Math.atan2(camera.position.x, camera.position.z);
+
+            let delta = angle - curAngle;
+            while (delta > Math.PI) delta -= Math.PI * 2;
+            while (delta < -Math.PI) delta += Math.PI * 2;
+
+            const needsRotate = Math.abs(delta) > 0.25;
+            const endAngle = curAngle + delta;
+
+            const startPos = camera.position.clone();
+            const startTarget = orbit.target.clone();
+            const dist = Math.sqrt(startPos.x * startPos.x + startPos.z * startPos.z);
+            const endPos = needsRotate
+                ? new THREE.Vector3(Math.sin(endAngle) * dist, startPos.y, Math.cos(endAngle) * dist)
+                : startPos.clone();
+            const endTarget = new THREE.Vector3(0, targetY * 0.5 + startTarget.y * 0.5, 0);
+
+            const duration = needsRotate ? 400 : 150;
+            const startT = performance.now();
+            (function tick(now) {
+                const t = Math.min(1, (now - startT) / duration);
+                const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                camera.position.lerpVectors(startPos, endPos, ease);
+                orbit.target.lerpVectors(startTarget, endTarget, ease);
+                orbit.update();
+                if (t < 1) {
+                    requestAnimationFrame(tick);
+                } else {
+                    callback();
+                }
+            })(performance.now());
+        }
 
         // Auto-start on load
         setTimeout(() => resetGame(), 300);
