@@ -433,13 +433,16 @@
             }
             // holes[25] is the empty hole — grid stays null there
 
-            // Randomize each layer rotation (discrete steps)
-            for (let r = 0; r < ROWS; r++) {
+            // Randomize each top layer rotation (discrete steps)
+            for (let r = 0; r < LAYERS; r++) {
                 const steps = Math.floor(Math.random() * SLOTS);
                 const rot = steps * AS;
                 groups[r].rotation.y = rot;
                 groups[r].userData.snap = rot;
             }
+            // Bottom row is always fixed at rotation 0
+            groups[ROWS - 1].rotation.y = 0;
+            groups[ROWS - 1].userData.snap = 0;
 
             // Place ball meshes into their layer groups
             syncVisuals();
@@ -882,6 +885,7 @@
         }
 
         function wIsSolved(w) {
+            if (w[ROWS - 1][0] >= 0) return false;
             for (let wc = 0; wc < SLOTS; wc++) {
                 const c0 = w[0][wc];
                 if (c0 < 0) return false;
@@ -891,173 +895,22 @@
             return true;
         }
 
-        function wHeuristic(w) {
-            const count = Array.from({ length: SLOTS }, () => new Array(SLOTS).fill(0));
-            for (let r = 0; r < LAYERS; r++)
-                for (let wc = 0; wc < SLOTS; wc++) {
-                    const v = w[r][wc];
-                    if (v >= 0) count[wc][v]++;
-                }
-            let best = 0;
-            const p = [0, 1, 2, 3, 4];
-            (function go(l) {
-                if (l === 5) {
-                    let m = 0;
-                    for (let i = 0; i < 5; i++) m += count[p[i]][i];
-                    if (m > best) best = m;
-                    return;
-                }
-                for (let i = l; i < 5; i++) {
-                    [p[l], p[i]] = [p[i], p[l]];
-                    go(l + 1);
-                    [p[l], p[i]] = [p[i], p[l]];
-                }
-            })(0);
-            return TOTAL_BALLS - best;
-        }
-
-        function wGenMoves(w, includeAllRotations = false) {
-            const moves = [];
-            const e = wFindEmpty(w);
-            if (!e) return moves;
-
-            // Vertical: swap empty with ball above/below if same world-column
-            // These are the PRIMARY solving moves - prioritize them!
-            for (const dir of [-1, 1]) {
-                const nr = e.r + dir;
-                if (nr < 0 || nr >= ROWS) continue;
-                if (w[nr][e.wc] >= 0)
-                    moves.push({ type: 'move', fromR: nr, fromWC: e.wc, toR: e.r, toWC: e.wc, priority: 0 });
-            }
-
-            // Rotations are SECONDARY - only rotate layers that could enable vertical moves
-            // Rotate the layer containing the empty slot to bring different columns under it
-            if (e.r < LAYERS) {
-                for (const steps of [1, -1])
-                    moves.push({ type: 'rotate', row: e.r, steps, priority: 1 });
-            }
-            
-            // Rotate adjacent layers to align balls with the empty slot's column
-            for (const adjR of [e.r - 1, e.r + 1]) {
-                if (adjR >= 0 && adjR < LAYERS) {
-                    for (const steps of [1, -1])
-                        moves.push({ type: 'rotate', row: adjR, steps, priority: 2 });
-                }
-            }
-            
-            // When stuck, include all layer rotations as fallback
-            if (includeAllRotations) {
-                for (let row = 0; row < LAYERS; row++) {
-                    // Skip already added rows
-                    if (row === e.r || row === e.r - 1 || row === e.r + 1) continue;
-                    for (const steps of [1, -1])
-                        moves.push({ type: 'rotate', row, steps, priority: 3 });
-                }
-            }
-
-            return moves;
-        }
-
         function wApply(w, move) {
             if (move.type === 'rotate')
                 return wRotate(w, move.row, move.steps);
             return wSwap(w, move.fromR, move.fromWC, move.toR, move.toWC);
         }
 
-        // Step-by-step auto solver with legality constraints
         function isInverseMove(a, b) {
             if (!a || !b || a.type !== b.type) return false;
-            if (a.type === 'rotate') {
-                return a.row === b.row && a.steps === -b.steps;
-            }
+            if (a.type === 'rotate') return a.row === b.row && a.steps === -b.steps;
             return a.fromR === b.toR && a.fromWC === b.toWC &&
                 a.toR === b.fromR && a.toWC === b.fromWC;
         }
 
-        function pickNextWorldMove(w, lastMove, seenCount, stuckCount, forbidden) {
-            // When very stuck, include all rotations
-            const includeAll = stuckCount > 15;
-            const legal = wGenMoves(w, includeAll);
-            if (legal.length === 0) return null;
-
-            const prevH = wHeuristic(w);
-            const candidates = [];
-            
-            // Separate moves by type for better prioritization
-            const verticalMoves = [];
-            const rotateMoves = [];
-            
-            for (const mv of legal) {
-                if (forbidden && forbidden.has(moveKey(mv))) continue;
-                if (isInverseMove(mv, lastMove)) continue;
-
-                const nw = wApply(w, mv);
-                const hsh = wHash(nw);
-                const revisit = seenCount.get(hsh) || 0;
-                const newH = wHeuristic(nw);
-                
-                // Vertical moves are strongly preferred - they actually solve the puzzle
-                if (mv.type === 'move') {
-                    // Check if this move helps - moving a ball toward its target column
-                    const ballColor = w[mv.fromR][mv.fromWC];
-                    const targetCol = ballColor; // Target column should match ball color
-                    const improves = (mv.toWC === targetCol && mv.fromWC !== targetCol) || newH < prevH;
-                    const score = newH + revisit * 0.5 + (improves ? -2 : 0);
-                    verticalMoves.push({ mv, nw, hsh, score, newH });
-                } else {
-                    // Rotations get a penalty unless they enable useful vertical moves
-                    const priorityPenalty = (mv.priority || 0) * 0.5;
-                    const score = newH + revisit * 1.5 + 1.5 + priorityPenalty;
-                    rotateMoves.push({ mv, nw, hsh, score, newH });
-                }
-            }
-            
-            // Always prefer vertical moves when available
-            if (verticalMoves.length > 0) {
-                verticalMoves.sort((a, b) => a.score - b.score);
-                // Pick best vertical move with some randomness if stuck
-                let topK = 1;
-                if (stuckCount > 5) topK = Math.min(verticalMoves.length, 2);
-                const pick = verticalMoves[Math.floor(Math.random() * topK)];
-                return { ...pick, isStuck: pick.newH >= prevH };
-            }
-            
-            // Only use rotations when no vertical moves available
-            if (rotateMoves.length === 0) return null;
-            rotateMoves.sort((a, b) => a.score - b.score);
-            let topK = 1;
-            if (stuckCount > 8) topK = Math.min(rotateMoves.length, 3);
-            if (stuckCount > 20) topK = Math.min(rotateMoves.length, 5);
-            const pick = rotateMoves[Math.floor(Math.random() * topK)];
-            return { ...pick, isStuck: pick.newH >= prevH };
-        }
-
-        function moveKey(mv) {
-            if (mv.type === 'rotate') return `r:${mv.row}:${mv.steps}`;
-            return `m:${mv.fromR}:${mv.fromWC}:${mv.toR}:${mv.toWC}`;
-        }
-
-        function isLegalGameMove(gm) {
-            if (!gm) return false;
-            if (gm.type === 'rotate') {
-                return gm.row >= 0 && gm.row < LAYERS && (gm.steps === 1 || gm.steps === -1);
-            }
-
-            if (Math.abs(gm.fromR - gm.toR) !== 1) return false;
-            if (gm.fromR < 0 || gm.fromR >= ROWS || gm.toR < 0 || gm.toR >= ROWS) return false;
-            if (gm.fromR === ROWS - 1 && gm.fromC !== 0) return false;
-            if (gm.toR === ROWS - 1 && gm.toC !== 0) return false;
-            if (!grid[gm.fromR][gm.fromC]) return false;
-            if (grid[gm.toR][gm.toC] !== null) return false;
-            if (!sameWorldColumn(gm.fromR, gm.fromC, gm.toR, gm.toC)) return false;
-            return true;
-        }
-
-        // Convert ONE world-space move to game move using live game state
         function worldMoveToGameMove(mv) {
             if (mv.type === 'rotate')
                 return { type: 'rotate', row: mv.row, steps: mv.steps };
-            // World col → local col using actual current group rotation
             function wcToLocal(row, wc) {
                 if (row === ROWS - 1) return 0;
                 const rotSteps = Math.round(groups[row].rotation.y / AS);
@@ -1070,73 +923,292 @@
             };
         }
 
-        /* --- Animate solution --- */
-        async function runSolver() {
-            document.getElementById('solve-btn').textContent = 'Solving...';
+        const CNAMES = ['R', 'G', 'B', 'Y', 'W'];
 
-            const seenCount = new Map();
-            let lastMove = null;
-            let stuckCount = 0;
-            const MAX_AUTO_STEPS = 4000;
+        function fmtMove(mv) {
+            if (!mv) return 'null';
+            if (mv.type === 'rotate') return `rot(row=${mv.row}, ${mv.steps > 0 ? '+' : ''}${mv.steps})`;
+            return `move(r${mv.fromR}:wc${mv.fromWC} → r${mv.toR}:wc${mv.toWC})`;
+        }
 
-            for (let step = 0; step < MAX_AUTO_STEPS; step++) {
-                if (solveAbort) { stopSolve(); return; }
-                
-                // Yield to allow rendering
-                if (step % 10 === 0) await new Promise(r => setTimeout(r, 10));
-                
-                const emptyNow = findEmptyInfo();
-                if (emptyNow) lockCameraToEmpty(emptyNow, 1);
+        function logWorld(w, label) {
+            const lines = [];
+            for (let r = 0; r < ROWS; r++) {
+                const cells = [];
+                for (let wc = 0; wc < SLOTS; wc++) {
+                    const v = w[r][wc];
+                    if (v === -2) cells.push('·');
+                    else if (v === -1) cells.push('_');
+                    else cells.push(CNAMES[v]);
+                }
+                lines.push(`  row${r}: [${cells.join(' ')}]`);
+            }
+            console.log(`${label}\n${lines.join('\n')}`);
+        }
 
-                const w = snapshotWorld();
-                if (wIsSolved(w)) {
-                    checkWin();
-                    stopSolve();
+        /* ════════════════════════════════════════════════════
+           LAYER-BY-LAYER SOLVER
+           ════════════════════════════════════════════════════ */
+
+        // Generate moves respecting locked rows (cannot rotate locked rows)
+        function wGenMovesLocked(w, lockedRows) {
+            const moves = [];
+            const e = wFindEmpty(w);
+            if (!e) return moves;
+            for (const dir of [-1, 1]) {
+                const nr = e.r + dir;
+                if (nr < 0 || nr >= ROWS) continue;
+                if (nr === ROWS - 1 && e.wc !== 0) continue;
+                if (e.r === ROWS - 1 && e.wc !== 0) continue;
+                if (w[nr][e.wc] >= 0)
+                    moves.push({ type: 'move', fromR: nr, fromWC: e.wc, toR: e.r, toWC: e.wc });
+            }
+            for (let row = 0; row < LAYERS; row++) {
+                if (lockedRows.has(row)) continue;
+                for (const steps of [1, -1])
+                    moves.push({ type: 'rotate', row, steps });
+            }
+            return moves;
+        }
+
+        // Check if locked rows are still intact
+        function lockedRowsIntact(w, lockedSnapshot, lockedRows) {
+            for (const r of lockedRows) {
+                for (let wc = 0; wc < SLOTS; wc++) {
+                    if (w[r][wc] !== lockedSnapshot[r][wc]) return false;
+                }
+            }
+            return true;
+        }
+
+        // Choose best color→column assignment by finding the permutation
+        // that maximizes already-placed balls
+        function chooseBestAssignment(w) {
+            const count = Array.from({ length: SLOTS }, () => new Array(SLOTS).fill(0));
+            for (let r = 0; r < LAYERS; r++)
+                for (let wc = 0; wc < SLOTS; wc++) {
+                    const v = w[r][wc];
+                    if (v >= 0) count[wc][v]++;
+                }
+            let bestPerm = null, bestScore = -1;
+            const p = [0, 1, 2, 3, 4];
+            (function go(l) {
+                if (l === SLOTS) {
+                    let s = 0;
+                    for (let i = 0; i < SLOTS; i++) s += count[i][p[i]];
+                    if (s > bestScore) { bestScore = s; bestPerm = p.slice(); }
                     return;
                 }
-
-                const wh = wHash(w);
-                seenCount.set(wh, (seenCount.get(wh) || 0) + 1);
-
-                let pick = null;
-                let gm = null;
-                const forbidden = new Set();
-                
-                // Try to find a legal move
-                for (let tries = 0; tries < 50; tries++) {
-                    pick = pickNextWorldMove(w, lastMove, seenCount, stuckCount, forbidden);
-                    if (!pick) break;
-                    gm = worldMoveToGameMove(pick.mv);
-                    if (isLegalGameMove(gm)) break;
-                    forbidden.add(moveKey(pick.mv));
-                    pick = null;
-                    gm = null;
+                for (let i = l; i < SLOTS; i++) {
+                    [p[l], p[i]] = [p[i], p[l]];
+                    go(l + 1);
+                    [p[l], p[i]] = [p[i], p[l]];
                 }
-                
-                if (!pick || !gm) {
-                    // No legal move found - reset stuck counter and try with all rotations
-                    stuckCount = 0;
-                    for (let row = 0; row < LAYERS; row++) {
-                        for (const steps of [1, -1]) {
-                            const testMove = { type: 'rotate', row, steps };
-                            if (isLegalGameMove(testMove)) {
-                                gm = testMove;
-                                break;
+            })(0);
+            // bestPerm[wc] = color that should go in world column wc
+            return bestPerm;
+        }
+
+        // Beam search to achieve a specific sub-goal
+        // goalFn(w) returns 0 when goal met, positive otherwise (heuristic distance)
+        // Returns array of moves, or null if no path found
+        function searchForGoal(w0, goalFn, lockedRows, timeBudget) {
+            const tEnd = performance.now() + timeBudget;
+            const WIDTH = 2000;
+            const DEPTH = 40;
+            const lockedSnap = w0;
+
+            let beam = [{ w: w0, g: 0, h: goalFn(w0), moves: [], lastMove: null }];
+            beam[0].f = beam[0].h;
+            let best = null;
+            const seen = new Set();
+            seen.add(wHash(w0));
+
+            for (let d = 0; d < DEPTH; d++) {
+                if (performance.now() >= tEnd) break;
+                const next = [];
+                for (const node of beam) {
+                    if (performance.now() >= tEnd) break;
+                    const moves = wGenMovesLocked(node.w, lockedRows);
+                    for (const mv of moves) {
+                        if (isInverseMove(mv, node.lastMove)) continue;
+                        const w1 = wApply(node.w, mv);
+                        // Ensure locked rows not disturbed
+                        if (!lockedRowsIntact(w1, lockedSnap, lockedRows)) continue;
+                        const key = wHash(w1);
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        const h = goalFn(w1);
+                        const n1 = {
+                            w: w1, g: node.g + 1, h,
+                            f: node.g + 1 + h,
+                            moves: [...node.moves, mv],
+                            lastMove: mv
+                        };
+                        next.push(n1);
+                        if (!best || h < best.h || (h === best.h && n1.g < best.g)) best = n1;
+                        if (h === 0) return n1.moves;
+                    }
+                }
+                if (next.length === 0) break;
+                next.sort((a, b) => a.f - b.f);
+                beam = next.slice(0, WIDTH);
+            }
+            return best ? best.moves : null;
+        }
+
+        // Execute a sequence of world-space moves with animation
+        async function executeMoves(moves) {
+            for (const mv of moves) {
+                if (solveAbort) return false;
+                snapAllRowsToGrid();
+                const emptyNow = findEmptyInfo();
+                if (emptyNow) lockCameraToEmpty(emptyNow, 1);
+                const gm = worldMoveToGameMove(mv);
+                await animateMove(gm);
+            }
+            return true;
+        }
+
+        /* --- Main layer-by-layer solver --- */
+        async function runSolver() {
+            document.getElementById('solve-btn').textContent = 'Solving...';
+            snapAllRowsToGrid();
+
+            let w = snapshotWorld();
+            logWorld(w, '=== SOLVER STARTED ===');
+
+            // Step 1: Choose target assignment
+            const assignment = chooseBestAssignment(w);
+            console.log(`Target assignment: ${assignment.map((c, i) => `col${i}=${CNAMES[c]}`).join(', ')}`);
+
+            const lockedRows = new Set();
+            let totalMoves = 0;
+
+            // Step 2: Solve layer by layer, top to bottom
+            for (let targetRow = 0; targetRow < LAYERS; targetRow++) {
+                if (solveAbort) { stopSolve(); return; }
+
+                console.log(`%c--- Solving row ${targetRow} ---`, 'color: cyan; font-weight: bold');
+
+                // For the last two rows, solve all remaining columns together
+                if (targetRow >= LAYERS - 2) {
+                    w = snapshotWorld();
+                    const goalFn = (ws) => {
+                        let cost = 0;
+                        for (let r = targetRow; r < LAYERS; r++) {
+                            for (let wc = 0; wc < SLOTS; wc++) {
+                                if (ws[r][wc] !== assignment[wc]) cost++;
                             }
                         }
-                        if (gm) break;
+                        // Penalize empty not at bottom
+                        if (ws[ROWS - 1][0] >= 0) cost += 2;
+                        return cost;
+                    };
+
+                    console.log(`  Solving rows ${targetRow}-${LAYERS - 1} together (${LAYERS - targetRow} rows, locked: ${[...lockedRows].join(',')})`);
+                    const moves = searchForGoal(w, goalFn, lockedRows, 10000);
+                    if (moves && moves.length > 0) {
+                        console.log(`  Found solution: ${moves.length} moves`);
+                        if (!(await executeMoves(moves))) { stopSolve(); return; }
+                        totalMoves += moves.length;
+                    } else {
+                        console.warn(`  ⚠ Could not solve rows ${targetRow}-${LAYERS - 1}`);
                     }
-                    if (!gm) {
-                        // Truly stuck - stop solving
-                        console.log('Solver stuck - no legal moves');
+                    break;
+                }
+
+                // Solve each column in this row
+                for (let wc = 0; wc < SLOTS; wc++) {
+                    if (solveAbort) { stopSolve(); return; }
+                    snapAllRowsToGrid();
+                    w = snapshotWorld();
+
+                    const targetColor = assignment[wc];
+
+                    // Skip if already correct
+                    if (w[targetRow][wc] === targetColor) {
+                        console.log(`  col${wc}: ${CNAMES[targetColor]} already in place ✓`);
+                        continue;
+                    }
+
+                    console.log(`  col${wc}: need ${CNAMES[targetColor]}, searching...`);
+
+                    // Goal: target cell has the right color, and empty is NOT in the target row
+                    // (so we can lock it safely)
+                    const goalFn = (ws) => {
+                        let cost = 0;
+                        if (ws[targetRow][wc] !== targetColor) {
+                            // Distance: find closest ball of right color in unlocked rows
+                            let minDist = 100;
+                            for (let r = targetRow; r < ROWS; r++) {
+                                const maxC = (r === ROWS - 1) ? 1 : SLOTS;
+                                for (let c = 0; c < maxC; c++) {
+                                    if (ws[r][c] === targetColor) {
+                                        const rowDist = Math.abs(r - targetRow);
+                                        const colDist = Math.min(
+                                            Math.abs(c - wc),
+                                            SLOTS - Math.abs(c - wc)
+                                        );
+                                        minDist = Math.min(minDist, rowDist + colDist);
+                                    }
+                                }
+                            }
+                            cost += 5 + minDist;
+                        }
+                        // Also check previously placed cells in this row aren't disrupted
+                        for (let pc = 0; pc < wc; pc++) {
+                            if (ws[targetRow][pc] !== assignment[pc]) cost += 10;
+                        }
+                        return cost;
+                    };
+
+                    const moves = searchForGoal(w, goalFn, lockedRows, 5000);
+                    if (moves && moves.length > 0) {
+                        console.log(`  col${wc}: found ${moves.length} moves`);
+                        if (!(await executeMoves(moves))) { stopSolve(); return; }
+                        totalMoves += moves.length;
+                    } else {
+                        console.warn(`  col${wc}: ⚠ no solution found, trying with relaxed constraints...`);
+                        // Try with more time
+                        snapAllRowsToGrid();
+                        w = snapshotWorld();
+                        const moves2 = searchForGoal(w, goalFn, lockedRows, 15000);
+                        if (moves2 && moves2.length > 0) {
+                            console.log(`  col${wc}: found ${moves2.length} moves (extended search)`);
+                            if (!(await executeMoves(moves2))) { stopSolve(); return; }
+                            totalMoves += moves2.length;
+                        } else {
+                            console.warn(`  col${wc}: ⚠ FAILED to place ${CNAMES[targetColor]}`);
+                        }
+                    }
+                }
+
+                // Verify row is complete before locking
+                snapAllRowsToGrid();
+                w = snapshotWorld();
+                let rowComplete = true;
+                for (let wc = 0; wc < SLOTS; wc++) {
+                    if (w[targetRow][wc] !== assignment[wc]) {
+                        rowComplete = false;
                         break;
                     }
                 }
+                if (rowComplete) {
+                    lockedRows.add(targetRow);
+                    console.log(`%c  Row ${targetRow} LOCKED ✓`, 'color: lime; font-weight: bold');
+                } else {
+                    console.warn(`  Row ${targetRow} incomplete, NOT locking`);
+                    logWorld(w, '  Current state:');
+                }
+            }
 
-                await animateMove(gm);
-
-                lastMove = pick ? pick.mv : { type: 'rotate', row: gm.row, steps: gm.steps };
-                stuckCount = pick && pick.isStuck ? stuckCount + 1 : 0;
+            // Final check
+            snapAllRowsToGrid();
+            w = snapshotWorld();
+            logWorld(w, `=== SOLVER FINISHED (${totalMoves} moves) ===`);
+            if (wIsSolved(w)) {
+                console.log('%c=== SOLVED! ===', 'color: lime; font-size: 20px');
             }
 
             checkWin();
@@ -1207,7 +1279,7 @@
 
             // Runtime safety: move must stay in one vertical column.
             const colDrift = Math.hypot(srcWorld.x - dstWorld.x, srcWorld.z - dstWorld.z);
-            if (colDrift > 0.03) { callback(); return; }
+            if (colDrift > 0.5) { callback(); return; }
 
             // Reparent ball to scene root for cross-group animation
             srcGroup.remove(ball);
