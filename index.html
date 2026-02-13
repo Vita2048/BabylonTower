@@ -123,6 +123,7 @@
             font-weight: 700;
             font-size: 16px;
         }
+
     </style>
 </head>
 
@@ -201,7 +202,12 @@
         initScene();
         requestAnimationFrame(function loop() {
             requestAnimationFrame(loop);
-            orbit.update();
+            if (solving && !solverCamBusy) {
+                const empty = findEmptyInfo();
+                if (empty) lockCameraToEmpty(empty, 1);
+            } else {
+                orbit.update();
+            }
             renderer.render(scene, camera);
         });
 
@@ -467,11 +473,44 @@
             return a;
         }
 
+        function rowRotSteps(r) {
+            const s = Math.round(groups[r].rotation.y / AS);
+            return ((s % SLOTS) + SLOTS) % SLOTS;
+        }
+
+        function worldColumn(r, c) {
+            // Local slot index shifts opposite to positive layer rotation.
+            return ((c - rowRotSteps(r)) % SLOTS + SLOTS) % SLOTS;
+        }
+
+        function sameWorldColumn(r1, c1, r2, c2) {
+            return worldColumn(r1, c1) === worldColumn(r2, c2);
+        }
+
         function angleDelta(a1, a2) {
             let d = a1 - a2;
             while (d > Math.PI) d -= Math.PI * 2;
             while (d < -Math.PI) d += Math.PI * 2;
             return Math.abs(d);
+        }
+
+        function normalizeAngle(a) {
+            while (a > Math.PI) a -= Math.PI * 2;
+            while (a < -Math.PI) a += Math.PI * 2;
+            return a;
+        }
+
+        // Hole angle (x=cos a, z=sin a) -> camera azimuth convention (atan2(x,z))
+        function holeToCameraAngle(holeAngle) {
+            return Math.PI / 2 - holeAngle;
+        }
+
+        function holeTargetPosition(angle, row) {
+            return new THREE.Vector3(
+                Math.cos(angle) * (CYL_R + 0.152),
+                ((ROWS - 1) / 2 - row) * RH,
+                Math.sin(angle) * (CYL_R + 0.152)
+            );
         }
 
         /* ════════════════════════════════════════════════════
@@ -510,6 +549,19 @@
                     clickRow = ri;
                     clickCol = col;
                 }
+            } else {
+                // Fallback: when the ray hits hole/rim instead of the ball, infer
+                // the local column from hit position and select the ball in that slot.
+                const localHit = grp.worldToLocal(hits[0].point.clone());
+                let a = Math.atan2(localHit.z, localHit.x);
+                if (a < 0) a += Math.PI * 2;
+                const col = (ri === ROWS - 1) ? 0 : (Math.round(a / AS) % SLOTS);
+                const inferredBall = grid[ri][col];
+                if (inferredBall) {
+                    clickBall = inferredBall;
+                    clickRow = ri;
+                    clickCol = col;
+                }
             }
 
             // Prepare drag for all layers
@@ -537,9 +589,11 @@
             if (animLock) { cleanup(); return; }
 
             // CLICK → try vertical ball move
-            if (clickBall && Math.abs(dragDx) <= 8) {
+            if (clickBall && Math.abs(dragDx) <= 12) {
                 if (!gameOn) startTimer();
-                tryMove(clickRow, clickCol);
+                snapAllRowsToGrid();
+                const pos = findBallInGrid(clickBall);
+                if (pos) tryMove(pos.r, pos.c);
             }
 
             // DRAG → snap rotation
@@ -577,6 +631,24 @@
             orbit.enabled = true;
         }
 
+        function snapAllRowsToGrid() {
+            for (let r = 0; r < ROWS; r++) {
+                const snp = Math.round(groups[r].rotation.y / AS) * AS;
+                groups[r].rotation.y = snp;
+                groups[r].userData.snap = snp;
+            }
+        }
+
+        function findBallInGrid(mesh) {
+            for (let r = 0; r < ROWS; r++) {
+                const maxC = (r === ROWS - 1) ? 1 : SLOTS;
+                for (let c = 0; c < maxC; c++) {
+                    if (grid[r][c] === mesh) return { r, c };
+                }
+            }
+            return null;
+        }
+
         /* ════════════════════════════════════════════════════
            BALL MOVEMENT
            ════════════════════════════════════════════════════ */
@@ -590,33 +662,20 @@
 
         function tryMove(fromR, fromC) {
             if (!grid[fromR][fromC]) return false;
-
-            const fromA = worldAngle(fromR, fromC);
-            for (const dir of [-1, 1]) {
-                const toR = fromR + dir;
-                if (toR < 0 || toR >= ROWS) continue;
-
-                const maxC = (toR === ROWS - 1) ? 1 : SLOTS;
-                let bestC = -1;
-                let bestD = Infinity;
-                for (let c = 0; c < maxC; c++) {
-                    if (grid[toR][c] !== null) continue; // not empty
-                    const d = angleDelta(fromA, worldAngle(toR, c));
-                    if (d < bestD) {
-                        bestD = d;
-                        bestC = c;
-                    }
-                }
-                if (bestC !== -1) {
-                    doMove(fromR, fromC, toR, bestC);
-                    return true;
-                }
-            }
-            return false;
+            const empty = findEmptyInfo();
+            if (!empty) return false;
+            if (Math.abs(empty.row - fromR) !== 1) return false;
+            // Rule: balls move only if the empty slot is in the same vertical world column.
+            if (!sameWorldColumn(fromR, fromC, empty.row, empty.col)) return false;
+            return doMove(fromR, fromC, empty.row, empty.col);
         }
 
         function doMove(fr, fc, tr, tc, skipWinCheck) {
             const ball = grid[fr][fc];
+            if (!ball) return false;
+            if (grid[tr][tc] !== null) return false;
+            if (Math.abs(fr - tr) !== 1) return false;
+            if (!sameWorldColumn(fr, fc, tr, tc)) return false;
 
             // Reparent ball to target layer
             groups[fr].remove(ball);
@@ -629,6 +688,7 @@
             grid[fr][fc] = null;
 
             if (!skipWinCheck) checkWin();
+            return true;
         }
 
         /* ════════════════════════════════════════════════════
@@ -645,9 +705,7 @@
                 for (let c = 0; c < maxC; c++) {
                     const b = grid[r][c];
                     if (!b) continue;
-                    let wa = c * AS + groups[r].rotation.y;
-                    wa = ((wa % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-                    const wc = Math.round(wa / AS) % SLOTS;
+                    const wc = worldColumn(r, c);
                     cols[wc].push(b.userData.ci);
                 }
             }
@@ -702,6 +760,45 @@
            ════════════════════════════════════════════════════ */
         let solving = false;
         let solveAbort = false;
+        let solveCamDistance = 8;
+        let solveCamYOffset = 2.5;
+        let solverCamBusy = false;
+
+        function initSolveCameraLock(empty) {
+            if (!empty) return;
+            const target = holeTargetPosition(empty.angle, empty.row);
+            const dx = camera.position.x - target.x;
+            const dz = camera.position.z - target.z;
+            solveCamDistance = Math.min(14, Math.max(6, Math.hypot(dx, dz)));
+            solveCamYOffset = camera.position.y - target.y;
+        }
+
+        function lockCameraToEmpty(empty, blend) {
+            if (!empty) return;
+            const t = holeTargetPosition(empty.angle, empty.row);
+            
+            // Camera should look directly at the empty hole from outside the cylinder
+            // The hole faces outward (perpendicular to cylinder surface)
+            const nx = Math.cos(empty.angle);
+            const nz = Math.sin(empty.angle);
+            
+            // Position camera directly in front of the hole, looking straight at it
+            const desiredPos = new THREE.Vector3(
+                t.x + nx * solveCamDistance,
+                t.y + solveCamYOffset,
+                t.z + nz * solveCamDistance
+            );
+
+            const a = (blend === undefined) ? 1 : blend;
+            if (a >= 1) {
+                camera.position.copy(desiredPos);
+                orbit.target.copy(t);
+            } else {
+                camera.position.lerp(desiredPos, a);
+                orbit.target.lerp(t, a);
+            }
+            orbit.update();
+        }
 
         window.toggleSolve = function () {
             if (solving) {
@@ -711,8 +808,15 @@
             solveAbort = false;
             solving = true;
             animLock = true;
+            orbit.enabled = false;
+            orbit.enableDamping = false;
             document.getElementById('solve-btn').textContent = 'Stop';
             if (!gameOn) startTimer();
+            const empty = findEmptyInfo();
+            if (empty) {
+                initSolveCameraLock(empty);
+                lockCameraToEmpty(empty, 1);
+            }
             runSolver();
         };
 
@@ -720,6 +824,9 @@
             solving = false;
             solveAbort = false;
             animLock = false;
+            solverCamBusy = false;
+            orbit.enabled = true;
+            orbit.enableDamping = true;
             document.getElementById('solve-btn').textContent = 'Solve';
         }
 
@@ -734,7 +841,7 @@
                 const maxC = (r === ROWS - 1) ? 1 : SLOTS;
                 const rotSteps = Math.round(groups[r].rotation.y / AS);
                 for (let c = 0; c < maxC; c++) {
-                    const wc = (((c + rotSteps) % SLOTS) + SLOTS) % SLOTS;
+                    const wc = (((c - rotSteps) % SLOTS) + SLOTS) % SLOTS;
                     row[wc] = grid[r][c] ? grid[r][c].userData.ci : -1;
                 }
                 w.push(row);
@@ -763,7 +870,7 @@
             const nw = wClone(w);
             const old = w[row];
             for (let c = 0; c < SLOTS; c++)
-                nw[row][(((c + steps) % SLOTS) + SLOTS) % SLOTS] = old[c];
+                nw[row][(((c - steps) % SLOTS) + SLOTS) % SLOTS] = old[c];
             return nw;
         }
 
@@ -809,23 +916,44 @@
             return TOTAL_BALLS - best;
         }
 
-        function wGenMoves(w) {
+        function wGenMoves(w, includeAllRotations = false) {
             const moves = [];
             const e = wFindEmpty(w);
             if (!e) return moves;
 
             // Vertical: swap empty with ball above/below if same world-column
+            // These are the PRIMARY solving moves - prioritize them!
             for (const dir of [-1, 1]) {
                 const nr = e.r + dir;
                 if (nr < 0 || nr >= ROWS) continue;
                 if (w[nr][e.wc] >= 0)
-                    moves.push({ type: 'move', fromR: nr, fromWC: e.wc, toR: e.r, toWC: e.wc });
+                    moves.push({ type: 'move', fromR: nr, fromWC: e.wc, toR: e.r, toWC: e.wc, priority: 0 });
             }
 
-            // Rotate any of the 5 top layers by ±1 or ±2 steps
-            for (let row = 0; row < LAYERS; row++)
-                for (const steps of [1, -1, 2, -2])
-                    moves.push({ type: 'rotate', row, steps });
+            // Rotations are SECONDARY - only rotate layers that could enable vertical moves
+            // Rotate the layer containing the empty slot to bring different columns under it
+            if (e.r < LAYERS) {
+                for (const steps of [1, -1])
+                    moves.push({ type: 'rotate', row: e.r, steps, priority: 1 });
+            }
+            
+            // Rotate adjacent layers to align balls with the empty slot's column
+            for (const adjR of [e.r - 1, e.r + 1]) {
+                if (adjR >= 0 && adjR < LAYERS) {
+                    for (const steps of [1, -1])
+                        moves.push({ type: 'rotate', row: adjR, steps, priority: 2 });
+                }
+            }
+            
+            // When stuck, include all layer rotations as fallback
+            if (includeAllRotations) {
+                for (let row = 0; row < LAYERS; row++) {
+                    // Skip already added rows
+                    if (row === e.r || row === e.r - 1 || row === e.r + 1) continue;
+                    for (const steps of [1, -1])
+                        moves.push({ type: 'rotate', row, steps, priority: 3 });
+                }
+            }
 
             return moves;
         }
@@ -836,71 +964,93 @@
             return wSwap(w, move.fromR, move.fromWC, move.toR, move.toWC);
         }
 
-        // Async greedy solver with multi-restart and random plateau escape
-        async function solve(w0) {
-            if (wIsSolved(w0)) return [];
-            const MAX_STEPS = 8000;
-            const MAX_ATTEMPTS = 10;
-
-            for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-                if (solveAbort) return null;
-                let w = wClone(w0);
-                const moves = [];
-                const seen = new Set();
-                seen.add(wHash(w));
-                let stuckCount = 0;
-
-                for (let step = 0; step < MAX_STEPS; step++) {
-                    if (solveAbort) return null;
-                    // yield every 200 steps so browser stays responsive
-                    if (step % 200 === 0)
-                        await new Promise(r => setTimeout(r, 0));
-
-                    if (wIsSolved(w)) return moves;
-
-                    const legal = wGenMoves(w);
-                    const candidates = [];
-                    for (const mv of legal) {
-                        // prune immediate inverse
-                        if (moves.length > 0) {
-                            const last = moves[moves.length - 1];
-                            if (mv.type === 'rotate' && last.type === 'rotate' &&
-                                mv.row === last.row && mv.steps === -last.steps) continue;
-                            if (mv.type === 'move' && last.type === 'move' &&
-                                mv.fromR === last.toR && mv.fromWC === last.toWC &&
-                                mv.toR === last.fromR && mv.toWC === last.fromWC) continue;
-                        }
-                        const nw = wApply(w, mv);
-                        const h = wHeuristic(nw);
-                        const hsh = wHash(nw);
-                        const penalty = seen.has(hsh) ? 3 : 0;
-                        candidates.push({ mv, nw, h: h + penalty, hsh });
-                    }
-                    if (candidates.length === 0) break;
-
-                    candidates.sort((a, b) => a.h - b.h);
-
-                    // Pick best, but use randomness to escape plateaus
-                    let pickRange = 1;
-                    if (stuckCount > 10) pickRange = Math.min(candidates.length, 5);
-                    if (stuckCount > 30) pickRange = Math.min(candidates.length, 8);
-                    const idx = pickRange > 1 ? Math.floor(Math.random() * pickRange) : 0;
-                    const pick = candidates[idx];
-
-                    const prevH = wHeuristic(w);
-                    if (pick.h >= prevH) stuckCount++;
-                    else stuckCount = 0;
-
-                    moves.push(pick.mv);
-                    w = pick.nw;
-                    seen.add(pick.hsh);
-
-                    // If stuck too long, restart
-                    if (stuckCount > 80) break;
-                }
-                if (wIsSolved(w)) return moves;
+        // Step-by-step auto solver with legality constraints
+        function isInverseMove(a, b) {
+            if (!a || !b || a.type !== b.type) return false;
+            if (a.type === 'rotate') {
+                return a.row === b.row && a.steps === -b.steps;
             }
-            return null;
+            return a.fromR === b.toR && a.fromWC === b.toWC &&
+                a.toR === b.fromR && a.toWC === b.fromWC;
+        }
+
+        function pickNextWorldMove(w, lastMove, seenCount, stuckCount, forbidden) {
+            // When very stuck, include all rotations
+            const includeAll = stuckCount > 15;
+            const legal = wGenMoves(w, includeAll);
+            if (legal.length === 0) return null;
+
+            const prevH = wHeuristic(w);
+            const candidates = [];
+            
+            // Separate moves by type for better prioritization
+            const verticalMoves = [];
+            const rotateMoves = [];
+            
+            for (const mv of legal) {
+                if (forbidden && forbidden.has(moveKey(mv))) continue;
+                if (isInverseMove(mv, lastMove)) continue;
+
+                const nw = wApply(w, mv);
+                const hsh = wHash(nw);
+                const revisit = seenCount.get(hsh) || 0;
+                const newH = wHeuristic(nw);
+                
+                // Vertical moves are strongly preferred - they actually solve the puzzle
+                if (mv.type === 'move') {
+                    // Check if this move helps - moving a ball toward its target column
+                    const ballColor = w[mv.fromR][mv.fromWC];
+                    const targetCol = ballColor; // Target column should match ball color
+                    const improves = (mv.toWC === targetCol && mv.fromWC !== targetCol) || newH < prevH;
+                    const score = newH + revisit * 0.5 + (improves ? -2 : 0);
+                    verticalMoves.push({ mv, nw, hsh, score, newH });
+                } else {
+                    // Rotations get a penalty unless they enable useful vertical moves
+                    const priorityPenalty = (mv.priority || 0) * 0.5;
+                    const score = newH + revisit * 1.5 + 1.5 + priorityPenalty;
+                    rotateMoves.push({ mv, nw, hsh, score, newH });
+                }
+            }
+            
+            // Always prefer vertical moves when available
+            if (verticalMoves.length > 0) {
+                verticalMoves.sort((a, b) => a.score - b.score);
+                // Pick best vertical move with some randomness if stuck
+                let topK = 1;
+                if (stuckCount > 5) topK = Math.min(verticalMoves.length, 2);
+                const pick = verticalMoves[Math.floor(Math.random() * topK)];
+                return { ...pick, isStuck: pick.newH >= prevH };
+            }
+            
+            // Only use rotations when no vertical moves available
+            if (rotateMoves.length === 0) return null;
+            rotateMoves.sort((a, b) => a.score - b.score);
+            let topK = 1;
+            if (stuckCount > 8) topK = Math.min(rotateMoves.length, 3);
+            if (stuckCount > 20) topK = Math.min(rotateMoves.length, 5);
+            const pick = rotateMoves[Math.floor(Math.random() * topK)];
+            return { ...pick, isStuck: pick.newH >= prevH };
+        }
+
+        function moveKey(mv) {
+            if (mv.type === 'rotate') return `r:${mv.row}:${mv.steps}`;
+            return `m:${mv.fromR}:${mv.fromWC}:${mv.toR}:${mv.toWC}`;
+        }
+
+        function isLegalGameMove(gm) {
+            if (!gm) return false;
+            if (gm.type === 'rotate') {
+                return gm.row >= 0 && gm.row < LAYERS && (gm.steps === 1 || gm.steps === -1);
+            }
+
+            if (Math.abs(gm.fromR - gm.toR) !== 1) return false;
+            if (gm.fromR < 0 || gm.fromR >= ROWS || gm.toR < 0 || gm.toR >= ROWS) return false;
+            if (gm.fromR === ROWS - 1 && gm.fromC !== 0) return false;
+            if (gm.toR === ROWS - 1 && gm.toC !== 0) return false;
+            if (!grid[gm.fromR][gm.fromC]) return false;
+            if (grid[gm.toR][gm.toC] !== null) return false;
+            if (!sameWorldColumn(gm.fromR, gm.fromC, gm.toR, gm.toC)) return false;
+            return true;
         }
 
         // Convert ONE world-space move to game move using live game state
@@ -909,8 +1059,9 @@
                 return { type: 'rotate', row: mv.row, steps: mv.steps };
             // World col → local col using actual current group rotation
             function wcToLocal(row, wc) {
+                if (row === ROWS - 1) return 0;
                 const rotSteps = Math.round(groups[row].rotation.y / AS);
-                return (((wc - rotSteps) % SLOTS) + SLOTS) % SLOTS;
+                return (((wc + rotSteps) % SLOTS) + SLOTS) % SLOTS;
             }
             return {
                 type: 'move',
@@ -921,27 +1072,71 @@
 
         /* --- Animate solution --- */
         async function runSolver() {
-            document.getElementById('solve-btn').textContent = 'Computing…';
-            await new Promise(r => setTimeout(r, 30));
+            document.getElementById('solve-btn').textContent = 'Solving...';
 
-            const w0 = snapshotWorld();
-            const solution = await solve(w0);
+            const seenCount = new Map();
+            let lastMove = null;
+            let stuckCount = 0;
+            const MAX_AUTO_STEPS = 4000;
 
-            if (solveAbort) { stopSolve(); return; }
-
-            if (!solution || solution.length === 0) {
-                stopSolve();
-                return;
-            }
-
-            document.getElementById('solve-btn').textContent = 'Stop';
-
-            for (let i = 0; i < solution.length; i++) {
+            for (let step = 0; step < MAX_AUTO_STEPS; step++) {
                 if (solveAbort) { stopSolve(); return; }
-                // Convert each move live against actual game state
-                const gm = worldMoveToGameMove(solution[i]);
+                
+                // Yield to allow rendering
+                if (step % 10 === 0) await new Promise(r => setTimeout(r, 10));
+                
+                const emptyNow = findEmptyInfo();
+                if (emptyNow) lockCameraToEmpty(emptyNow, 1);
+
+                const w = snapshotWorld();
+                if (wIsSolved(w)) {
+                    checkWin();
+                    stopSolve();
+                    return;
+                }
+
+                const wh = wHash(w);
+                seenCount.set(wh, (seenCount.get(wh) || 0) + 1);
+
+                let pick = null;
+                let gm = null;
+                const forbidden = new Set();
+                
+                // Try to find a legal move
+                for (let tries = 0; tries < 50; tries++) {
+                    pick = pickNextWorldMove(w, lastMove, seenCount, stuckCount, forbidden);
+                    if (!pick) break;
+                    gm = worldMoveToGameMove(pick.mv);
+                    if (isLegalGameMove(gm)) break;
+                    forbidden.add(moveKey(pick.mv));
+                    pick = null;
+                    gm = null;
+                }
+                
+                if (!pick || !gm) {
+                    // No legal move found - reset stuck counter and try with all rotations
+                    stuckCount = 0;
+                    for (let row = 0; row < LAYERS; row++) {
+                        for (const steps of [1, -1]) {
+                            const testMove = { type: 'rotate', row, steps };
+                            if (isLegalGameMove(testMove)) {
+                                gm = testMove;
+                                break;
+                            }
+                        }
+                        if (gm) break;
+                    }
+                    if (!gm) {
+                        // Truly stuck - stop solving
+                        console.log('Solver stuck - no legal moves');
+                        break;
+                    }
+                }
+
                 await animateMove(gm);
-                if (solveAbort) { stopSolve(); return; }
+
+                lastMove = pick ? pick.mv : { type: 'rotate', row: gm.row, steps: gm.steps };
+                stuckCount = pick && pick.isStuck ? stuckCount + 1 : 0;
             }
 
             checkWin();
@@ -949,12 +1144,12 @@
         }
 
         // Find the world-space angle of the empty hole (searches all rows)
-        function findEmptyWorldAngle() {
+        function findEmptyInfo() {
             for (let r = 0; r < ROWS; r++) {
                 const maxC = (r === ROWS - 1) ? 1 : SLOTS;
                 for (let c = 0; c < maxC; c++) {
                     if (grid[r][c] === null) {
-                        return { angle: worldAngle(r, c), row: r };
+                        return { angle: worldAngle(r, c), row: r, col: c };
                     }
                 }
             }
@@ -963,23 +1158,36 @@
 
         function animateMove(move) {
             return new Promise(resolve => {
-                // Always point camera at the empty hole before every move
-                const empty = findEmptyWorldAngle();
+                // Keep empty hole visible before every move
+                const empty = findEmptyInfo();
                 if (!empty) { resolve(); return; }
-                pointCameraAt(empty.angle, empty.row, () => {
+                solverCamBusy = true;
+
+                // Position camera first, then execute move
+                lockCameraToEmpty(empty, 1);
+                
+                // Use requestAnimationFrame to ensure camera is updated before move
+                requestAnimationFrame(() => {
                     if (move.type === 'rotate') {
-                        doAnimatedRotation(move.row, move.steps, resolve);
+                        doAnimatedRotation(move.row, move.steps, () => {
+                            solverCamBusy = false;
+                            resolve();
+                        }, empty);
                     } else {
-                        doAnimatedBallMove(move.fromR, move.fromC, move.toR, move.toC, resolve);
+                        doAnimatedBallMove(move.fromR, move.fromC, move.toR, move.toC, () => {
+                            solverCamBusy = false;
+                            resolve();
+                        }, empty);
                     }
                 });
             });
         }
 
         // Animate ball sliding straight up or down into the empty hole
-        function doAnimatedBallMove(fr, fc, tr, tc, callback) {
+        function doAnimatedBallMove(fr, fc, tr, tc, callback, emptyBefore) {
             const ball = grid[fr][fc];
             if (!ball) { callback(); return; }
+            if (grid[tr][tc] !== null) { callback(); return; }
 
             // Force matrix updates so world positions are current
             scene.updateMatrixWorld(true);
@@ -997,18 +1205,49 @@
             );
             const dstWorld = dstLocal.clone().applyMatrix4(dstGroup.matrixWorld);
 
+            // Runtime safety: move must stay in one vertical column.
+            const colDrift = Math.hypot(srcWorld.x - dstWorld.x, srcWorld.z - dstWorld.z);
+            if (colDrift > 0.03) { callback(); return; }
+
             // Reparent ball to scene root for cross-group animation
             srcGroup.remove(ball);
-            ball.position.copy(srcWorld);
+            const verticalX = (srcWorld.x + dstWorld.x) * 0.5;
+            const verticalZ = (srcWorld.z + dstWorld.z) * 0.5;
+            ball.position.set(verticalX, srcWorld.y, verticalZ);
             scene.add(ball);
 
-            // Straight line from src to dst (ball moves purely up/down along the cylinder surface)
+            // The empty slot moves from (tr, tc) to (fr, fc) as the ball moves
+            // Empty starts at destination row and ends at source row
             const duration = 400;
             const startT = performance.now();
+            
+            // Calculate the world angle of the column where the move happens
+            const moveAngle = worldAngle(fr, fc);
+            const nx = Math.cos(moveAngle);
+            const nz = Math.sin(moveAngle);
+            const targetR = CYL_R + 0.152;
+            
             (function tick(now) {
                 const t = Math.min(1, (now - startT) / duration);
                 const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-                ball.position.lerpVectors(srcWorld, dstWorld, ease);
+                
+                // Animate ball position
+                ball.position.set(verticalX, srcWorld.y + (dstWorld.y - srcWorld.y) * ease, verticalZ);
+                
+                // Track the empty slot - it moves from tr to fr as ball moves
+                const emptyY = ((ROWS - 1) / 2 - tr) + (((ROWS - 1) / 2 - fr) - ((ROWS - 1) / 2 - tr)) * ease;
+                const tx = nx * targetR;
+                const tz = nz * targetR;
+                
+                // Keep camera centered on the moving empty slot
+                orbit.target.set(tx, emptyY * RH, tz);
+                camera.position.set(
+                    tx + nx * solveCamDistance,
+                    emptyY * RH + solveCamYOffset,
+                    tz + nz * solveCamDistance
+                );
+                orbit.update();
+                
                 if (t < 1) {
                     requestAnimationFrame(tick);
                 } else {
@@ -1023,57 +1262,40 @@
             })(performance.now());
         }
 
-        function doAnimatedRotation(row, steps, callback) {
+        function doAnimatedRotation(row, steps, callback, emptyBefore) {
             const layer = groups[row];
             const startRot = layer.rotation.y;
             const endRot = startRot + steps * AS;
             const duration = 300;
             const startT = performance.now();
+
+            // If empty slot is on this layer, track it as the layer rotates
+            const emptyOnThisLayer = emptyBefore && emptyBefore.row === row;
+            
+            // If empty is on a different layer, keep camera fixed on it
+            const emptyOnOtherLayer = emptyBefore && emptyBefore.row !== row;
+
             (function tick(now) {
                 const t = Math.min(1, (now - startT) / duration);
                 const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
                 layer.rotation.y = startRot + (endRot - startRot) * ease;
+
+                // Keep empty slot centered in camera view
+                if (emptyOnThisLayer) {
+                    // Empty moves with the layer - calculate its new world angle
+                    const newEmptyAngle = emptyBefore.col * AS + layer.rotation.y;
+                    const normalizedAngle = ((newEmptyAngle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+                    lockCameraToEmpty({ angle: normalizedAngle, row }, 1);
+                } else if (emptyOnOtherLayer) {
+                    // Empty stays fixed - just keep camera on it
+                    lockCameraToEmpty(emptyBefore, 1);
+                }
+
                 if (t < 1) {
                     requestAnimationFrame(tick);
                 } else {
                     layer.rotation.y = endRot;
                     layer.userData.snap = endRot;
-                    callback();
-                }
-            })(performance.now());
-        }
-
-        // Smoothly orbit camera so the given world angle faces the viewer
-        function pointCameraAt(angle, row, callback) {
-            const targetY = ((ROWS - 1) / 2 - row) * RH;
-            const curAngle = Math.atan2(camera.position.x, camera.position.z);
-
-            let delta = angle - curAngle;
-            while (delta > Math.PI) delta -= Math.PI * 2;
-            while (delta < -Math.PI) delta += Math.PI * 2;
-
-            const needsRotate = Math.abs(delta) > 0.25;
-            const endAngle = curAngle + delta;
-
-            const startPos = camera.position.clone();
-            const startTarget = orbit.target.clone();
-            const dist = Math.sqrt(startPos.x * startPos.x + startPos.z * startPos.z);
-            const endPos = needsRotate
-                ? new THREE.Vector3(Math.sin(endAngle) * dist, startPos.y, Math.cos(endAngle) * dist)
-                : startPos.clone();
-            const endTarget = new THREE.Vector3(0, targetY * 0.5 + startTarget.y * 0.5, 0);
-
-            const duration = needsRotate ? 400 : 150;
-            const startT = performance.now();
-            (function tick(now) {
-                const t = Math.min(1, (now - startT) / duration);
-                const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-                camera.position.lerpVectors(startPos, endPos, ease);
-                orbit.target.lerpVectors(startTarget, endTarget, ease);
-                orbit.update();
-                if (t < 1) {
-                    requestAnimationFrame(tick);
-                } else {
                     callback();
                 }
             })(performance.now());
