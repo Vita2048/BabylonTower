@@ -112,6 +112,77 @@
             margin-bottom: 0;
             opacity: 0.8;
         }
+
+        #setup-modal {
+            position: absolute;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: 10;
+            pointer-events: auto;
+        }
+
+        #setup-modal.open {
+            display: flex;
+        }
+
+        #setup-dialog {
+            width: min(92vw, 360px);
+            background: #141418;
+            border: 1px solid #444;
+            border-radius: 12px;
+            padding: 18px;
+            color: #eee;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+        }
+
+        #setup-dialog h2 {
+            font-size: 20px;
+            margin-bottom: 14px;
+        }
+
+        .setup-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 12px;
+        }
+
+        .setup-row label {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .setup-row input {
+            width: 88px;
+            background: #0e0e12;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 8px;
+            padding: 8px 10px;
+            font-size: 14px;
+        }
+
+        #setup-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 8px;
+        }
+
+        #setup-actions button {
+            background: linear-gradient(135deg, #333, #222);
+            color: #eee;
+            border: 1px solid #555;
+            padding: 8px 14px;
+            cursor: pointer;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 13px;
+        }
     </style>
 </head>
 
@@ -126,7 +197,25 @@
     </div>
     <div id="controls">
         <button onclick="resetGame()">New Game</button>
+        <button onclick="openSetup()">Setup</button>
         <button id="solve-btn" onclick="toggleSolve()">Solve</button>
+    </div>
+    <div id="setup-modal">
+        <div id="setup-dialog">
+            <h2>Setup</h2>
+            <div class="setup-row">
+                <label for="setup-columns">Columns (5-10)</label>
+                <input id="setup-columns" type="number" min="5" max="10" value="5">
+            </div>
+            <div class="setup-row">
+                <label for="setup-rows">Rows (7-10)</label>
+                <input id="setup-rows" type="number" min="7" max="10" value="7">
+            </div>
+            <div id="setup-actions">
+                <button onclick="closeSetup()">Cancel</button>
+                <button onclick="applySetup()">Apply</button>
+            </div>
+        </div>
     </div>
 
     <script type="importmap">
@@ -143,39 +232,53 @@
         /* ════════════════════════════════════════════════════
            CONFIG
            ════════════════════════════════════════════════════ */
-        const LAYERS = 5;           // top rotating layers
-        const SLOTS = 5;           // holes per top layer
-        const ROWS = 6;           // 5 top + 1 bottom
-        const TOTAL_HOLES = 26;     // 5*5 + 1
-        const TOTAL_BALLS = 25;     // 5 colors × 5 each
-        const COLORS = [
+        const COLOR_POOL = [
             0xee2222, // Vivid Red
             0x22cc22, // Bright Green
             0x2266ff, // Deep Blue
             0xffd300, // Golden Yellow
-            0xffffff  // Pure White
+            0xffffff, // Pure White
+            0xff7f11, // Orange
+            0xbb66ff, // Violet
+            0x00d4d8, // Cyan
+            0xff4fa3, // Pink
+            0x8ccf35  // Lime
         ];
+        let SLOTS = 5;              // columns
+        let ROWS = 7;               // total rows (top layers + 1 bottom row)
+        let LAYERS = ROWS - 1;      // top rotating layers
+        let TOTAL_HOLES = LAYERS * SLOTS + 1;
+        let TOTAL_BALLS = LAYERS * SLOTS;
+        let COLORS = COLOR_POOL.slice(0, SLOTS);
         const CYL_R = 2.0;        // cylinder radius
         const RH = 1.3;        // row height
-        const AS = Math.PI * 2 / SLOTS;  // angle step = 72°
+        let AS = Math.PI * 2 / SLOTS;  // angle step per column
         const BALL_R = 0.48;
         const HOLE_R = BALL_R * 1.08;
         const HOLE_RIM = HOLE_R * 1.07;
         const HOLE_DEPTH = 0.08;
+
+        function updateDerivedConfig() {
+            LAYERS = ROWS - 1;
+            TOTAL_HOLES = LAYERS * SLOTS + 1;
+            TOTAL_BALLS = LAYERS * SLOTS;
+            COLORS = COLOR_POOL.slice(0, SLOTS);
+            AS = Math.PI * 2 / SLOTS;
+        }
 
         /* ════════════════════════════════════════════════════
            STATE
            ════════════════════════════════════════════════════ */
         let scene, camera, renderer, orbit;
         let towerPivot;
-        let groups = [];            // THREE.Group per row [0..5]
+        let groundMesh;
+        let groups = [];            // THREE.Group per row
 
         // grid[r][c] = ball mesh or null
-        // rows 0-4: indices 0..4 (5 slots each)
-        // row 5:    index 0 only (1 slot)
+        // top rows use [0..SLOTS-1], bottom row uses index 0 only
         let grid = [];
 
-        // All 25 ball meshes (created once, reused)
+        // All ball meshes (created once per reset, then reused)
         let allBalls = [];
 
         // Interaction
@@ -195,6 +298,7 @@
         });
 
         function initScene() {
+            updateDerivedConfig();
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x0a0a12);
             towerPivot = new THREE.Group();
@@ -216,7 +320,7 @@
             orbit.dampingFactor = 0.08;
             orbit.minDistance = 6;
             orbit.maxDistance = 20;
-            orbit.target.set(0, 0.5, 0);
+            orbit.target.set(0, 0.15, 0);
 
             // Lights
             scene.add(new THREE.AmbientLight(0xffffff, 1.2));
@@ -236,16 +340,86 @@
             scene.add(p2);
 
             // Ground
-            const gnd = new THREE.Mesh(
+            groundMesh = new THREE.Mesh(
                 new THREE.PlaneGeometry(30, 30),
                 new THREE.MeshStandardMaterial({ color: 0x080810, roughness: 0.9 })
             );
-            gnd.rotation.x = -Math.PI / 2;
-            gnd.position.y = -ROWS * RH / 2 - 0.5;
-            gnd.receiveShadow = true;
-            scene.add(gnd);
+            groundMesh.rotation.x = -Math.PI / 2;
+            groundMesh.receiveShadow = true;
+            scene.add(groundMesh);
+            updateGroundPosition();
 
-            // Create 25 ball meshes once
+            createBalls();
+
+            buildFrame();
+            scramble();
+
+            addEventListener('resize', () => {
+                camera.aspect = innerWidth / innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(innerWidth, innerHeight);
+                frameCamera(solving);
+            });
+            renderer.domElement.addEventListener('pointerdown', onDown);
+            renderer.domElement.addEventListener('pointermove', onMov);
+            addEventListener('pointerup', onUp);
+            document.getElementById('setup-modal').addEventListener('click', (e) => {
+                if (e.target.id === 'setup-modal') window.closeSetup();
+            });
+            addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') window.closeSetup();
+            });
+            frameCamera(false);
+        }
+
+        function updateGroundPosition() {
+            if (!groundMesh) return;
+            groundMesh.position.y = -ROWS * RH / 2 - 0.5;
+        }
+
+        function computeFramedDistance() {
+            const vFov = THREE.MathUtils.degToRad(camera.fov);
+            const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+            const height = ROWS * RH + 1.2;
+            const radius = CYL_R + BALL_R + 0.35;
+            const width = radius * 2.2;
+
+            const visibleV = ROWS >= 10 ? 0.62 : ROWS >= 9 ? 0.66 : ROWS >= 8 ? 0.72 : 0.78;
+            const visibleH = SLOTS >= 10 ? 0.82 : SLOTS >= 9 ? 0.85 : 0.9;
+
+            const distV = (height * 0.5) / (Math.tan(vFov / 2) * visibleV);
+            const distH = (width * 0.5) / (Math.tan(hFov / 2) * visibleH);
+            const fitDist = Math.max(distV, distH);
+
+            // Keep default 5x7 a touch closer, larger boards slightly farther.
+            if (ROWS <= 7 && SLOTS <= 5) return fitDist * 0.93;
+            if (ROWS >= 10 || SLOTS >= 10) return fitDist * 1.05;
+            return fitDist;
+        }
+
+        function frameCamera(forSolver = false) {
+            if (!camera || !orbit) return;
+            const dist = computeFramedDistance();
+            const targetY = 0.15;
+
+            orbit.target.set(0, targetY, 0);
+            if (forSolver) {
+                camera.position.set(0, targetY + dist * 0.08, dist);
+            } else {
+                const yaw = Math.atan2(camera.position.x, camera.position.z) || 0.61;
+                const yRatio = 0.37;
+                const y = targetY + dist * yRatio;
+                const planar = Math.sqrt(Math.max(0.01, dist * dist - (dist * yRatio) * (dist * yRatio)));
+                camera.position.set(Math.sin(yaw) * planar, y, Math.cos(yaw) * planar);
+            }
+
+            orbit.minDistance = Math.max(5, dist * 0.65);
+            orbit.maxDistance = Math.max(orbit.minDistance + 2, dist * 1.85);
+            orbit.update();
+        }
+
+        function createBalls() {
+            allBalls.forEach(b => { if (b.parent) b.parent.remove(b); });
             const bGeo = new THREE.SphereGeometry(BALL_R, 32, 32);
             allBalls = [];
             for (let ci = 0; ci < SLOTS; ci++) {
@@ -259,18 +433,6 @@
                     allBalls.push(b);
                 }
             }
-
-            buildFrame();
-            scramble();
-
-            addEventListener('resize', () => {
-                camera.aspect = innerWidth / innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(innerWidth, innerHeight);
-            });
-            renderer.domElement.addEventListener('pointerdown', onDown);
-            renderer.domElement.addEventListener('pointermove', onMov);
-            addEventListener('pointerup', onUp);
         }
 
         /* ════════════════════════════════════════════════════
@@ -387,7 +549,7 @@
         }
 
         /* ════════════════════════════════════════════════════
-           SCRAMBLE — shuffle 25 balls into 26 holes randomly
+           SCRAMBLE — shuffle all balls into all holes randomly
            ════════════════════════════════════════════════════ */
         function scramble() {
             // Remove all balls from scene
@@ -397,12 +559,12 @@
             grid = [];
             for (let r = 0; r < ROWS; r++) grid.push(new Array(SLOTS).fill(null));
 
-            // Build list of all 26 hole positions: {row, col}
+            // Build list of all hole positions
             const holes = [];
             for (let r = 0; r < LAYERS; r++)
                 for (let c = 0; c < SLOTS; c++)
                     holes.push({ r, c });
-            holes.push({ r: 5, c: 0 }); // bottom slot
+            holes.push({ r: ROWS - 1, c: 0 }); // bottom slot
 
             // Shuffle holes (Fisher-Yates)
             for (let i = holes.length - 1; i > 0; i--) {
@@ -410,13 +572,13 @@
                 [holes[i], holes[j]] = [holes[j], holes[i]];
             }
 
-            // First 25 holes get balls, last hole stays empty
+            // First N holes get balls, last hole stays empty
             for (let i = 0; i < TOTAL_BALLS; i++) {
                 const h = holes[i];
                 const ball = allBalls[i];
                 grid[h.r][h.c] = ball;
             }
-            // holes[25] is the empty hole — grid stays null there
+            // Final hole stays empty
 
             // Randomize each top layer rotation (discrete steps)
             for (let r = 0; r < LAYERS; r++) {
@@ -724,13 +886,43 @@
            ════════════════════════════════════════════════════ */
         window.resetGame = function () {
             if (solving) { solveAbort = true; solving = false; }
+            updateDerivedConfig();
+            updateGroundPosition();
+            createBalls();
+            buildFrame();
             scramble();
+            frameCamera(false);
             gameOn = false;
             animLock = false;
             if (tiv) clearInterval(tiv);
             document.getElementById('timer').innerText = '00:00';
             document.getElementById('win-msg').style.display = 'none';
             document.getElementById('solve-btn').textContent = 'Solve';
+        };
+
+        window.openSetup = function () {
+            if (solving) return;
+            document.getElementById('setup-columns').value = String(SLOTS);
+            document.getElementById('setup-rows').value = String(ROWS);
+            document.getElementById('setup-modal').classList.add('open');
+        };
+
+        window.closeSetup = function () {
+            document.getElementById('setup-modal').classList.remove('open');
+        };
+
+        window.applySetup = function () {
+            const colInput = document.getElementById('setup-columns');
+            const rowInput = document.getElementById('setup-rows');
+            const cols = Math.max(5, Math.min(10, Number(colInput.value) || 5));
+            const rows = Math.max(7, Math.min(10, Number(rowInput.value) || 7));
+            colInput.value = String(cols);
+            rowInput.value = String(rows);
+
+            SLOTS = cols;
+            ROWS = rows;
+            window.closeSetup();
+            window.resetGame();
         };
 
         /* ════════════════════════════════════════════════════
@@ -809,10 +1001,8 @@
             document.getElementById('solve-btn').textContent = 'Stop';
             if (!gameOn) startTimer();
 
-            // Position camera at a fixed distance, then rotate tower so empty faces camera
-            camera.position.set(0, 0, 14);
-            orbit.target.set(0, 0, 0);
-            orbit.update();
+            // Position camera for current board size, then rotate tower so empty faces camera.
+            frameCamera(true);
 
             // Initial alignment: rotate tower so empty faces camera, then start solver
             alignPuzzleToCameraAfterTurn(() => { runSolver(); });
@@ -825,11 +1015,12 @@
             orbit.enabled = true;
             orbit.enableDamping = true;
             document.getElementById('solve-btn').textContent = 'Solve';
+            frameCamera(false);
         }
 
         /*  ── World-space state for solver ──
-            w[r][wc] = color (0-4) or -1 (empty)
-            Row 0-4: 5 world-columns each.  Row 5: only wc that the bottom slot maps to is valid; rest are -2 (blocked).
+            w[r][wc] = color (0..SLOTS-1) or -1 (empty)
+            Top rows have SLOTS world-columns. Bottom row has one valid world-column; others are -2.
         */
         function snapshotWorld() {
             const w = [];
@@ -952,8 +1143,7 @@
             return true;
         }
 
-        // Choose best color→column assignment by finding the permutation
-        // that maximizes already-placed balls
+        // Choose best color-to-column assignment by maximizing already-placed balls.
         function chooseBestAssignment(w) {
             const count = Array.from({ length: SLOTS }, () => new Array(SLOTS).fill(0));
             for (let r = 0; r < LAYERS; r++)
@@ -961,32 +1151,54 @@
                     const v = w[r][wc];
                     if (v >= 0) count[wc][v]++;
                 }
-            let bestPerm = null, bestScore = -1;
-            const p = [0, 1, 2, 3, 4];
-            (function go(l) {
-                if (l === SLOTS) {
-                    let s = 0;
-                    for (let i = 0; i < SLOTS; i++) s += count[i][p[i]];
-                    if (s > bestScore) { bestScore = s; bestPerm = p.slice(); }
-                    return;
-                }
-                for (let i = l; i < SLOTS; i++) {
-                    [p[l], p[i]] = [p[i], p[l]];
-                    go(l + 1);
-                    [p[l], p[i]] = [p[i], p[l]];
-                }
-            })(0);
-            // bestPerm[wc] = color that should go in world column wc
-            return bestPerm;
-        }
 
+            // Max-weight bipartite matching via bitmask DP (works well up to 10 columns).
+            const n = SLOTS;
+            const size = 1 << n;
+            const NEG = -1e9;
+            const dp = new Int32Array(size);
+            const parentMask = new Int32Array(size);
+            const chosenColor = new Int16Array(size);
+            dp.fill(NEG);
+            parentMask.fill(-1);
+            chosenColor.fill(-1);
+            dp[0] = 0;
+
+            for (let mask = 0; mask < size; mask++) {
+                if (dp[mask] === NEG) continue;
+
+                let wc = 0;
+                for (let m = mask; m; m &= (m - 1)) wc++;
+                if (wc >= n) continue;
+
+                for (let color = 0; color < n; color++) {
+                    if (mask & (1 << color)) continue;
+                    const nextMask = mask | (1 << color);
+                    const nextScore = dp[mask] + count[wc][color];
+                    if (nextScore > dp[nextMask]) {
+                        dp[nextMask] = nextScore;
+                        parentMask[nextMask] = mask;
+                        chosenColor[nextMask] = color;
+                    }
+                }
+            }
+
+            const assignment = new Array(n).fill(0);
+            let mask = size - 1;
+            for (let wc = n - 1; wc >= 0; wc--) {
+                assignment[wc] = chosenColor[mask];
+                mask = parentMask[mask];
+                if (mask < 0) break;
+            }
+            return assignment;
+        }
         // Beam search to achieve a specific sub-goal
         // goalFn(w) returns 0 when goal met, positive otherwise (heuristic distance)
         // Returns array of moves, or null if no path found
         function searchForGoal(w0, goalFn, lockedRows, timeBudget) {
             const tEnd = performance.now() + timeBudget;
-            const WIDTH = 2000;
-            const DEPTH = 40;
+            const WIDTH = Math.min(6000, 1200 + SLOTS * LAYERS * 80);
+            const DEPTH = Math.max(40, 24 + LAYERS * 4);
             const lockedSnap = w0;
 
             let beam = [{ w: w0, g: 0, h: goalFn(w0), moves: [], lastMove: null }];
@@ -1043,6 +1255,7 @@
         async function runSolver() {
             document.getElementById('solve-btn').textContent = 'Stop';
             snapAllRowsToGrid();
+            const budgetScale = Math.max(1, (SLOTS * LAYERS) / 30);
 
             let w = snapshotWorld();
             // Step 1: Choose target assignment
@@ -1070,7 +1283,7 @@
                         return cost;
                     };
 
-                    const moves = searchForGoal(w, goalFn, lockedRows, 10000);
+                    const moves = searchForGoal(w, goalFn, lockedRows, Math.round(10000 * budgetScale));
                     if (moves && moves.length > 0) {
                         if (!(await executeMoves(moves))) { stopSolve(); return; }
                         totalMoves += moves.length;
@@ -1118,7 +1331,7 @@
                         return cost;
                     };
 
-                    const moves = searchForGoal(w, goalFn, lockedRows, 5000);
+                    const moves = searchForGoal(w, goalFn, lockedRows, Math.round(5000 * budgetScale));
                     if (moves && moves.length > 0) {
                         if (!(await executeMoves(moves))) { stopSolve(); return; }
                         totalMoves += moves.length;
@@ -1126,7 +1339,7 @@
                         // Try with more time
                         snapAllRowsToGrid();
                         w = snapshotWorld();
-                        const moves2 = searchForGoal(w, goalFn, lockedRows, 15000);
+                        const moves2 = searchForGoal(w, goalFn, lockedRows, Math.round(15000 * budgetScale));
                         if (moves2 && moves2.length > 0) {
                             if (!(await executeMoves(moves2))) { stopSolve(); return; }
                             totalMoves += moves2.length;
@@ -1149,9 +1362,54 @@
                 }
             }
 
-            // Final check
+            // Final cleanup pass for larger boards: solve any remaining mismatches globally.
+            snapAllRowsToGrid();
+            w = snapshotWorld();
+            if (!solveAbort && !wIsSolved(w)) {
+                const globalGoalFn = (ws) => {
+                    let cost = 0;
+                    if (ws[ROWS - 1][0] >= 0) cost += 4;
+                    for (let wc = 0; wc < SLOTS; wc++) {
+                        const top = ws[0][wc];
+                        if (top < 0) { cost += 3; continue; }
+                        for (let r = 1; r < LAYERS; r++) {
+                            if (ws[r][wc] !== top) cost++;
+                        }
+                    }
+                    return cost;
+                };
+
+                for (const baseBudget of [12000, 24000, 36000]) {
+                    if (solveAbort) { stopSolve(); return; }
+                    snapAllRowsToGrid();
+                    w = snapshotWorld();
+                    if (wIsSolved(w)) break;
+
+                    const moves = searchForGoal(
+                        w,
+                        globalGoalFn,
+                        new Set(),
+                        Math.round(baseBudget * budgetScale)
+                    );
+                    if (moves && moves.length > 0) {
+                        if (!(await executeMoves(moves))) { stopSolve(); return; }
+                        totalMoves += moves.length;
+                    }
+                }
+            }
+
             snapAllRowsToGrid();
             checkWin();
+            if (!solveAbort && gameOn) {
+                document.getElementById('hint').textContent =
+                    'Solver stopped before full solution. Press Solve again or New Game.';
+                setTimeout(() => {
+                    if (gameOn) {
+                        document.getElementById('hint').innerHTML =
+                            'Drag layers to rotate &bull; Click balls to move into empty slot';
+                    }
+                }, 3000);
+            }
             stopSolve();
         }
 
@@ -1267,8 +1525,9 @@
         }
 
         // Auto-start on load
-        setTimeout(() => resetGame(), 300);
+        setTimeout(() => window.resetGame(), 300);
     </script>
 </body>
 
 </html>
+
