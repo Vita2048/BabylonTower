@@ -109,19 +109,8 @@
 
         #win-msg p {
             font-size: 20px;
-            margin-bottom: 20px;
+            margin-bottom: 0;
             opacity: 0.8;
-        }
-
-        #win-msg button {
-            background: #4ade80;
-            color: #111;
-            border: none;
-            padding: 12px 30px;
-            cursor: pointer;
-            border-radius: 10px;
-            font-weight: 700;
-            font-size: 16px;
         }
     </style>
 </head>
@@ -134,7 +123,6 @@
     <div id="win-msg">
         <h1>&#127881; Solved!</h1>
         <p id="final-time"></p>
-        <button onclick="resetGame()">Play Again</button>
     </div>
     <div id="controls">
         <button onclick="resetGame()">New Game</button>
@@ -711,7 +699,9 @@
             clearInterval(tiv);
             document.getElementById('final-time').innerText =
                 'Time: ' + document.getElementById('timer').innerText;
-            document.getElementById('win-msg').style.display = 'block';
+            const winMsg = document.getElementById('win-msg');
+            winMsg.style.display = 'block';
+            setTimeout(() => { winMsg.style.display = 'none'; }, 3000);
         }
 
         /* ════════════════════════════════════════════════════
@@ -782,12 +772,6 @@
             while (delta > Math.PI) delta -= Math.PI * 2;
             while (delta < -Math.PI) delta += Math.PI * 2;
 
-            console.log(
-                `[ALIGN] empty=(${empty.row},${empty.col}) worldPos=(${worldPos.x.toFixed(2)},${worldPos.z.toFixed(2)})` +
-                ` emptyAz=${(emptyAzimuth * 180 / Math.PI).toFixed(1)}° camAz=${(camAzimuth * 180 / Math.PI).toFixed(1)}°` +
-                ` delta=${(delta * 180 / Math.PI).toFixed(1)}°`
-            );
-
             if (Math.abs(delta) < 0.01) {
                 done();
                 return;
@@ -829,15 +813,6 @@
             camera.position.set(0, 0, 14);
             orbit.target.set(0, 0, 0);
             orbit.update();
-
-            const empty = findEmptyInfo();
-            if (empty) {
-                console.log(
-                    `[SOLVE-START] camPos=(${camera.position.x.toFixed(2)}, ${camera.position.y.toFixed(2)}, ${camera.position.z.toFixed(2)})` +
-                    ` | target=(${orbit.target.x.toFixed(2)}, ${orbit.target.y.toFixed(2)}, ${orbit.target.z.toFixed(2)})` +
-                    ` | empty: row=${empty.row} col=${empty.col} angle=${(empty.angle * 180 / Math.PI).toFixed(1)}°`
-                );
-            }
 
             // Initial alignment: rotate tower so empty faces camera, then start solver
             alignPuzzleToCameraAfterTurn(() => { runSolver(); });
@@ -940,29 +915,6 @@
                 fromR: mv.fromR, fromC: wcToLocal(mv.fromR, mv.fromWC),
                 toR: mv.toR, toC: wcToLocal(mv.toR, mv.toWC)
             };
-        }
-
-        const CNAMES = ['R', 'G', 'B', 'Y', 'W'];
-
-        function fmtMove(mv) {
-            if (!mv) return 'null';
-            if (mv.type === 'rotate') return `rot(row=${mv.row}, ${mv.steps > 0 ? '+' : ''}${mv.steps})`;
-            return `move(r${mv.fromR}:wc${mv.fromWC} → r${mv.toR}:wc${mv.toWC})`;
-        }
-
-        function logWorld(w, label) {
-            const lines = [];
-            for (let r = 0; r < ROWS; r++) {
-                const cells = [];
-                for (let wc = 0; wc < SLOTS; wc++) {
-                    const v = w[r][wc];
-                    if (v === -2) cells.push('·');
-                    else if (v === -1) cells.push('_');
-                    else cells.push(CNAMES[v]);
-                }
-                lines.push(`  row${r}: [${cells.join(' ')}]`);
-            }
-            console.log(`${label}\n${lines.join('\n')}`);
         }
 
         /* ════════════════════════════════════════════════════
@@ -1089,15 +1041,12 @@
 
         /* --- Main layer-by-layer solver --- */
         async function runSolver() {
-            document.getElementById('solve-btn').textContent = 'Solving...';
+            document.getElementById('solve-btn').textContent = 'Stop';
             snapAllRowsToGrid();
 
             let w = snapshotWorld();
-            logWorld(w, '=== SOLVER STARTED ===');
-
             // Step 1: Choose target assignment
             const assignment = chooseBestAssignment(w);
-            console.log(`Target assignment: ${assignment.map((c, i) => `col${i}=${CNAMES[c]}`).join(', ')}`);
 
             const lockedRows = new Set();
             let totalMoves = 0;
@@ -1105,8 +1054,6 @@
             // Step 2: Solve layer by layer, top to bottom
             for (let targetRow = 0; targetRow < LAYERS; targetRow++) {
                 if (solveAbort) { stopSolve(); return; }
-
-                console.log(`%c--- Solving row ${targetRow} ---`, 'color: cyan; font-weight: bold');
 
                 // For the last two rows, solve all remaining columns together
                 if (targetRow >= LAYERS - 2) {
@@ -1123,14 +1070,10 @@
                         return cost;
                     };
 
-                    console.log(`  Solving rows ${targetRow}-${LAYERS - 1} together (${LAYERS - targetRow} rows, locked: ${[...lockedRows].join(',')})`);
                     const moves = searchForGoal(w, goalFn, lockedRows, 10000);
                     if (moves && moves.length > 0) {
-                        console.log(`  Found solution: ${moves.length} moves`);
                         if (!(await executeMoves(moves))) { stopSolve(); return; }
                         totalMoves += moves.length;
-                    } else {
-                        console.warn(`  ⚠ Could not solve rows ${targetRow}-${LAYERS - 1}`);
                     }
                     break;
                 }
@@ -1144,12 +1087,7 @@
                     const targetColor = assignment[wc];
 
                     // Skip if already correct
-                    if (w[targetRow][wc] === targetColor) {
-                        console.log(`  col${wc}: ${CNAMES[targetColor]} already in place ✓`);
-                        continue;
-                    }
-
-                    console.log(`  col${wc}: need ${CNAMES[targetColor]}, searching...`);
+                    if (w[targetRow][wc] === targetColor) continue;
 
                     // Goal: target cell has the right color, and empty is NOT in the target row
                     // (so we can lock it safely)
@@ -1182,21 +1120,16 @@
 
                     const moves = searchForGoal(w, goalFn, lockedRows, 5000);
                     if (moves && moves.length > 0) {
-                        console.log(`  col${wc}: found ${moves.length} moves`);
                         if (!(await executeMoves(moves))) { stopSolve(); return; }
                         totalMoves += moves.length;
                     } else {
-                        console.warn(`  col${wc}: ⚠ no solution found, trying with relaxed constraints...`);
                         // Try with more time
                         snapAllRowsToGrid();
                         w = snapshotWorld();
                         const moves2 = searchForGoal(w, goalFn, lockedRows, 15000);
                         if (moves2 && moves2.length > 0) {
-                            console.log(`  col${wc}: found ${moves2.length} moves (extended search)`);
                             if (!(await executeMoves(moves2))) { stopSolve(); return; }
                             totalMoves += moves2.length;
-                        } else {
-                            console.warn(`  col${wc}: ⚠ FAILED to place ${CNAMES[targetColor]}`);
                         }
                     }
                 }
@@ -1213,21 +1146,11 @@
                 }
                 if (rowComplete) {
                     lockedRows.add(targetRow);
-                    console.log(`%c  Row ${targetRow} LOCKED ✓`, 'color: lime; font-weight: bold');
-                } else {
-                    console.warn(`  Row ${targetRow} incomplete, NOT locking`);
-                    logWorld(w, '  Current state:');
                 }
             }
 
             // Final check
             snapAllRowsToGrid();
-            w = snapshotWorld();
-            logWorld(w, `=== SOLVER FINISHED (${totalMoves} moves) ===`);
-            if (wIsSolved(w)) {
-                console.log('%c=== SOLVED! ===', 'color: lime; font-size: 20px');
-            }
-
             checkWin();
             stopSolve();
         }
@@ -1250,12 +1173,6 @@
                 const empty = findEmptyInfo();
                 if (!empty) { resolve(); return; }
 
-                console.log(
-                    `[ANIM-MOVE] type=${move.type}` +
-                    (move.type === 'rotate' ? ` row=${move.row} steps=${move.steps}` : ` from=(${move.fromR},${move.fromC}) to=(${move.toR},${move.toC})`) +
-                    ` | empty before: row=${empty.row} col=${empty.col} angle=${(empty.angle * 180 / Math.PI).toFixed(1)}°`
-                );
-
                 const onDone = () => {
                     alignPuzzleToCameraAfterTurn(() => { resolve(); });
                 };
@@ -1270,10 +1187,9 @@
 
         // Animate ball sliding straight up or down into the empty hole
         function doAnimatedBallMove(fr, fc, tr, tc, callback, emptyBefore) {
-            console.log(`[BALL-MOVE] from=(${fr},${fc}) to=(${tr},${tc}) | emptyBefore: row=${emptyBefore?.row} col=${emptyBefore?.col} angle=${emptyBefore ? (emptyBefore.angle * 180 / Math.PI).toFixed(1) + '°' : 'N/A'}`);
             const ball = grid[fr][fc];
-            if (!ball) { console.warn('[BALL-MOVE] no ball at source!'); callback(); return; }
-            if (grid[tr][tc] !== null) { console.warn('[BALL-MOVE] destination not empty!'); callback(); return; }
+            if (!ball) { callback(); return; }
+            if (grid[tr][tc] !== null) { callback(); return; }
 
             // Force matrix updates so world positions are current
             scene.updateMatrixWorld(true);
@@ -1334,11 +1250,6 @@
             const endRot = startRot + steps * AS;
             const duration = 300;
             const startT = performance.now();
-
-            console.log(
-                `[ROTATION] row=${row} steps=${steps} startRot=${(startRot * 180 / Math.PI).toFixed(1)}° endRot=${(endRot * 180 / Math.PI).toFixed(1)}°` +
-                ` | emptyBefore: row=${emptyBefore?.row} col=${emptyBefore?.col} angle=${emptyBefore ? (emptyBefore.angle * 180 / Math.PI).toFixed(1) + '°' : 'N/A'}`
-            );
 
             (function tick(now) {
                 const t = Math.min(1, (now - startT) / duration);
