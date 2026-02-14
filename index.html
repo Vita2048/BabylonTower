@@ -1156,7 +1156,6 @@
             const p = Array.from({ length: SLOTS }, (_, i) => i);
 
             // For large SLOTS, full permutation is too slow (10! is huge).
-            // Use a greedy approach if SLOTS > 7, otherwise full search.
             if (SLOTS > 7) {
                 // Greedy assignment
                 const usedColors = new Set();
@@ -1177,27 +1176,22 @@
                         assignment[item.c] = item.bestC;
                         usedColors.add(item.bestC);
                     } else {
-                        // Find next best
-                        let found = false;
-                        // Sort colors for this column
-                        const sortedColors = count[item.c].map((n, i) => ({ i, n })).sort((a, b) => b.n - a.n);
-                        for (const sc of sortedColors) {
-                            if (!usedColors.has(sc.i)) {
-                                assignment[item.c] = sc.i;
-                                usedColors.add(sc.i);
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            // Assign any unused
-                            for (let i = 0; i < SLOTS; i++) {
-                                if (!usedColors.has(i)) {
-                                    assignment[item.c] = i;
-                                    usedColors.add(i);
-                                    break;
+                        // Color already used. We must pick another.
+                        // Ideally picking the one that has max count in this column among unused.
+                        let bestAlt = -1, maxAlt = -1;
+                        for (let clr = 0; clr < SLOTS; clr++) {
+                            if (!usedColors.has(clr)) {
+                                if (count[item.c][clr] > maxAlt) {
+                                    maxAlt = count[item.c][clr];
+                                    bestAlt = clr;
                                 }
                             }
+                        }
+                        if (bestAlt !== -1) {
+                            assignment[item.c] = bestAlt;
+                            usedColors.add(bestAlt);
+                        } else {
+                            // Should not happen if SLOTS colors available
                         }
                     }
                 }
@@ -1226,8 +1220,11 @@
         // Returns array of moves, or null if no path found
         function searchForGoal(w0, goalFn, lockedRows, timeBudget) {
             const tEnd = performance.now() + timeBudget;
-            const WIDTH = 2000;
-            const DEPTH = 60; // Increased depth for potentially complex moves
+            // Scale search parameters with puzzle size
+            const sizeFactor = (ROWS * SLOTS) / 35; // baseline 5x7=35
+            // For 10x10 (sizeFactor ~ 3), we need fairly wide beam to find specific moves
+            const WIDTH = Math.floor(3000 * Math.max(1, sizeFactor));
+            const DEPTH = Math.floor(ROWS * 16);
             const lockedSnap = w0;
 
             let beam = [{ w: w0, g: 0, h: goalFn(w0), moves: [], lastMove: null }];
@@ -1333,74 +1330,92 @@
                     break;
                 }
 
-                // Solve each column in this row
-                for (let wc = 0; wc < SLOTS; wc++) {
-                    if (solveAbort) { stopSolve(); return; }
-                    snapAllRowsToGrid();
-                    w = snapshotWorld();
+                // Solve the entire row until complete
+                let rowAttempts = 0;
+                let rowSolved = false;
 
-                    const targetColor = assignment[wc];
+                while (!rowAttempts || (!rowSolved && rowAttempts < 5)) {
+                    rowAttempts++;
 
-                    // Skip if already correct
-                    if (w[targetRow][wc] === targetColor) continue;
-
-                    // Goal: target cell has the right color, and empty is NOT in the target row
-                    // (so we can lock it safely)
-                    const goalFn = (ws) => {
-                        let cost = 0;
-                        if (ws[targetRow][wc] !== targetColor) {
-                            // Distance: find closest ball of right color in unlocked rows
-                            let minDist = 100;
-                            for (let r = targetRow; r < ROWS; r++) {
-                                const maxC = (r === ROWS - 1) ? 1 : SLOTS;
-                                for (let c = 0; c < maxC; c++) {
-                                    if (ws[r][c] === targetColor) {
-                                        const rowDist = Math.abs(r - targetRow);
-                                        const colDist = Math.min(
-                                            Math.abs(c - wc),
-                                            SLOTS - Math.abs(c - wc)
-                                        );
-                                        minDist = Math.min(minDist, rowDist + colDist);
-                                    }
-                                }
-                            }
-                            cost += 5 + minDist;
-                        }
-                        // Also check previously placed cells in this row aren't disrupted
-                        for (let pc = 0; pc < wc; pc++) {
-                            if (ws[targetRow][pc] !== assignment[pc]) cost += 10;
-                        }
-                        return cost;
-                    };
-
-                    const moves = searchForGoal(w, goalFn, lockedRows, 5000);
-                    if (moves && moves.length > 0) {
-                        if (!(await executeMoves(moves))) { stopSolve(); return; }
-                        totalMoves += moves.length;
-                    } else {
-                        // Try with more time
+                    // Solve each column in this row
+                    for (let wc = 0; wc < SLOTS; wc++) {
+                        if (solveAbort) { stopSolve(); return; }
                         snapAllRowsToGrid();
                         w = snapshotWorld();
-                        const moves2 = searchForGoal(w, goalFn, lockedRows, 15000);
-                        if (moves2 && moves2.length > 0) {
-                            if (!(await executeMoves(moves2))) { stopSolve(); return; }
-                            totalMoves += moves2.length;
+
+                        const targetColor = assignment[wc];
+
+                        // Skip if already correct
+                        if (w[targetRow][wc] === targetColor) continue;
+
+                        // Goal: target cell has the right color
+                        // We also check that we don't break previous columns in this row
+                        const goalFn = (ws) => {
+                            let cost = 0;
+                            if (ws[targetRow][wc] !== targetColor) {
+                                // Distance: find closest ball of right color in unlocked rows
+                                let minDist = 100;
+                                for (let r = targetRow; r < ROWS; r++) {
+                                    const maxC = (r === ROWS - 1) ? 1 : SLOTS;
+                                    for (let c = 0; c < maxC; c++) {
+                                        if (ws[r][c] === targetColor) {
+                                            const rowDist = Math.abs(r - targetRow);
+                                            // Cylinder distance
+                                            const d = Math.abs(c - wc);
+                                            const colDist = Math.min(d, SLOTS - d);
+                                            minDist = Math.min(minDist, rowDist + colDist);
+                                        }
+                                    }
+                                }
+                                cost += 5 + minDist;
+                            }
+                            // Simplified Goal: Correct target + don't break STRICTLY PREVIOUS columns.
+                            // We do NOT penalize future columns or transient states of other columns.
+                            for (let pc = 0; pc < wc; pc++) {
+                                if (ws[targetRow][pc] !== assignment[pc]) cost += 20;
+                            }
+
+                            // Heuristic helper: if we are solving column wc, we prefer the empty slot 
+                            // to be "near" meaningful work areas or at bottom, rather than 
+                            // stuck in top rows (which might block rotation?)
+                            // Actually, let's just trust distance.
+
+                            return cost;
+                        };
+
+                        // Use generous time budget for large puzzles
+                        // For 10x10, finding the FIRST move is hard. 
+                        let moves = searchForGoal(w, goalFn, lockedRows, 10000);
+                        if (!moves && SLOTS > 7) {
+                            // Try even harder. 
+                            moves = searchForGoal(w, goalFn, lockedRows, 30000);
+                        }
+
+                        if (moves && moves.length > 0) {
+                            if (!(await executeMoves(moves))) { stopSolve(); return; }
+                            totalMoves += moves.length;
                         }
                     }
+
+                    // Check if row is fully solved
+                    snapAllRowsToGrid();
+                    w = snapshotWorld();
+                    rowSolved = true;
+                    for (let c = 0; c < SLOTS; c++) {
+                        if (w[targetRow][c] !== assignment[c]) {
+                            rowSolved = false;
+                            break;
+                        }
+                    }
+                    if (rowSolved) break;
                 }
 
-                // Verify row is complete before locking
-                snapAllRowsToGrid();
-                w = snapshotWorld();
-                let rowComplete = true;
-                for (let wc = 0; wc < SLOTS; wc++) {
-                    if (w[targetRow][wc] !== assignment[wc]) {
-                        rowComplete = false;
-                        break;
-                    }
-                }
-                if (rowComplete) {
+                if (rowSolved) {
                     lockedRows.add(targetRow);
+                } else {
+                    // Could not solve row after retries. Abort or continue (will likely fail later)
+                    console.warn("Failed to solve row " + targetRow);
+                    // We continue, but it might spiral.
                 }
             }
 
