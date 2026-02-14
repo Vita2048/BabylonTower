@@ -123,7 +123,6 @@
             font-weight: 700;
             font-size: 16px;
         }
-
     </style>
 </head>
 
@@ -180,6 +179,7 @@
            STATE
            ════════════════════════════════════════════════════ */
         let scene, camera, renderer, orbit;
+        let towerPivot;
         let groups = [];            // THREE.Group per row [0..5]
 
         // grid[r][c] = ball mesh or null
@@ -202,18 +202,15 @@
         initScene();
         requestAnimationFrame(function loop() {
             requestAnimationFrame(loop);
-            if (solving && !solverCamBusy) {
-                const empty = findEmptyInfo();
-                if (empty) lockCameraToEmpty(empty, 1);
-            } else {
-                orbit.update();
-            }
+            orbit.update();
             renderer.render(scene, camera);
         });
 
         function initScene() {
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x0a0a12);
+            towerPivot = new THREE.Group();
+            scene.add(towerPivot);
 
             camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
             camera.position.set(7, 5, 10);
@@ -292,7 +289,7 @@
            BUILD FRAME (geometry only, no balls)
            ════════════════════════════════════════════════════ */
         function buildFrame() {
-            groups.forEach(g => scene.remove(g));
+            groups.forEach(g => { if (g.parent) g.parent.remove(g); });
             groups = [];
 
             const fm = new THREE.MeshStandardMaterial({
@@ -319,7 +316,7 @@
                 const g = new THREE.Group();
                 g.position.y = ((ROWS - 1) / 2 - r) * RH;
                 g.userData = { ri: r, snap: 0 };
-                scene.add(g);
+                towerPivot.add(g);
                 groups.push(g);
 
                 // Outer shell
@@ -443,6 +440,7 @@
             // Bottom row is always fixed at rotation 0
             groups[ROWS - 1].rotation.y = 0;
             groups[ROWS - 1].userData.snap = 0;
+            towerPivot.rotation.y = 0;
 
             // Place ball meshes into their layer groups
             syncVisuals();
@@ -501,19 +499,6 @@
             while (a > Math.PI) a -= Math.PI * 2;
             while (a < -Math.PI) a += Math.PI * 2;
             return a;
-        }
-
-        // Hole angle (x=cos a, z=sin a) -> camera azimuth convention (atan2(x,z))
-        function holeToCameraAngle(holeAngle) {
-            return Math.PI / 2 - holeAngle;
-        }
-
-        function holeTargetPosition(angle, row) {
-            return new THREE.Vector3(
-                Math.cos(angle) * (CYL_R + 0.152),
-                ((ROWS - 1) / 2 - row) * RH,
-                Math.sin(angle) * (CYL_R + 0.152)
-            );
         }
 
         /* ════════════════════════════════════════════════════
@@ -763,44 +748,68 @@
            ════════════════════════════════════════════════════ */
         let solving = false;
         let solveAbort = false;
-        let solveCamDistance = 8;
-        let solveCamYOffset = 2.5;
-        let solverCamBusy = false;
 
-        function initSolveCameraLock(empty) {
-            if (!empty) return;
-            const target = holeTargetPosition(empty.angle, empty.row);
-            const dx = camera.position.x - target.x;
-            const dz = camera.position.z - target.z;
-            solveCamDistance = Math.min(14, Math.max(6, Math.hypot(dx, dz)));
-            solveCamYOffset = camera.position.y - target.y;
+        function normalizeAnglePositive(a) {
+            return ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
         }
 
-        function lockCameraToEmpty(empty, blend) {
-            if (!empty) return;
-            const t = holeTargetPosition(empty.angle, empty.row);
-            
-            // Camera should look directly at the empty hole from outside the cylinder
-            // The hole faces outward (perpendicular to cylinder surface)
-            const nx = Math.cos(empty.angle);
-            const nz = Math.sin(empty.angle);
-            
-            // Position camera directly in front of the hole, looking straight at it
-            const desiredPos = new THREE.Vector3(
-                t.x + nx * solveCamDistance,
-                t.y + solveCamYOffset,
-                t.z + nz * solveCamDistance
+        function alignPuzzleToCameraAfterTurn(done) {
+            if (!towerPivot) { done(); return; }
+            const empty = findEmptyInfo();
+            if (!empty) { done(); return; }
+
+            // Use Three.js matrices to get the actual world position of the empty slot
+            scene.updateMatrixWorld(true);
+            const localPos = new THREE.Vector3(
+                Math.cos(empty.col * AS) * CYL_R, 0, Math.sin(empty.col * AS) * CYL_R
+            );
+            const worldPos = localPos.applyMatrix4(groups[empty.row].matrixWorld);
+
+            // Current world-space azimuth of empty slot (angle from center in XZ plane)
+            const emptyAzimuth = Math.atan2(worldPos.x, worldPos.z);
+
+            // Camera azimuth (direction from target to camera)
+            const camAzimuth = Math.atan2(
+                camera.position.x - orbit.target.x,
+                camera.position.z - orbit.target.z
             );
 
-            const a = (blend === undefined) ? 1 : blend;
-            if (a >= 1) {
-                camera.position.copy(desiredPos);
-                orbit.target.copy(t);
-            } else {
-                camera.position.lerp(desiredPos, a);
-                orbit.target.lerp(t, a);
+            // Delta: rotate tower so empty azimuth matches camera azimuth
+            // towerPivot.rotation.y is a Y-axis rotation; positive Y-rot moves
+            // points from +Z toward +X, which increases atan2(x,z).
+            // So we need to add (camAzimuth - emptyAzimuth) to towerPivot.rotation.y.
+            let delta = camAzimuth - emptyAzimuth;
+            while (delta > Math.PI) delta -= Math.PI * 2;
+            while (delta < -Math.PI) delta += Math.PI * 2;
+
+            console.log(
+                `[ALIGN] empty=(${empty.row},${empty.col}) worldPos=(${worldPos.x.toFixed(2)},${worldPos.z.toFixed(2)})` +
+                ` emptyAz=${(emptyAzimuth * 180 / Math.PI).toFixed(1)}° camAz=${(camAzimuth * 180 / Math.PI).toFixed(1)}°` +
+                ` delta=${(delta * 180 / Math.PI).toFixed(1)}°`
+            );
+
+            if (Math.abs(delta) < 0.01) {
+                done();
+                return;
             }
-            orbit.update();
+
+            const startYaw = towerPivot.rotation.y;
+            const endYaw = startYaw + delta;
+            const duration = 300;
+            const startT = performance.now();
+
+            (function tick(now) {
+                const t = Math.min(1, (now - startT) / duration);
+                const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                towerPivot.rotation.y = startYaw + (endYaw - startYaw) * ease;
+
+                if (t < 1) {
+                    requestAnimationFrame(tick);
+                } else {
+                    towerPivot.rotation.y = endYaw;
+                    done();
+                }
+            })(performance.now());
         }
 
         window.toggleSolve = function () {
@@ -815,19 +824,29 @@
             orbit.enableDamping = false;
             document.getElementById('solve-btn').textContent = 'Stop';
             if (!gameOn) startTimer();
+
+            // Position camera at a fixed distance, then rotate tower so empty faces camera
+            camera.position.set(0, 0, 14);
+            orbit.target.set(0, 0, 0);
+            orbit.update();
+
             const empty = findEmptyInfo();
             if (empty) {
-                initSolveCameraLock(empty);
-                lockCameraToEmpty(empty, 1);
+                console.log(
+                    `[SOLVE-START] camPos=(${camera.position.x.toFixed(2)}, ${camera.position.y.toFixed(2)}, ${camera.position.z.toFixed(2)})` +
+                    ` | target=(${orbit.target.x.toFixed(2)}, ${orbit.target.y.toFixed(2)}, ${orbit.target.z.toFixed(2)})` +
+                    ` | empty: row=${empty.row} col=${empty.col} angle=${(empty.angle * 180 / Math.PI).toFixed(1)}°`
+                );
             }
-            runSolver();
+
+            // Initial alignment: rotate tower so empty faces camera, then start solver
+            alignPuzzleToCameraAfterTurn(() => { runSolver(); });
         };
 
         function stopSolve() {
             solving = false;
             solveAbort = false;
             animLock = false;
-            solverCamBusy = false;
             orbit.enabled = true;
             orbit.enableDamping = true;
             document.getElementById('solve-btn').textContent = 'Solve';
@@ -1062,8 +1081,6 @@
             for (const mv of moves) {
                 if (solveAbort) return false;
                 snapAllRowsToGrid();
-                const emptyNow = findEmptyInfo();
-                if (emptyNow) lockCameraToEmpty(emptyNow, 1);
                 const gm = worldMoveToGameMove(mv);
                 await animateMove(gm);
             }
@@ -1230,36 +1247,33 @@
 
         function animateMove(move) {
             return new Promise(resolve => {
-                // Keep empty hole visible before every move
                 const empty = findEmptyInfo();
                 if (!empty) { resolve(); return; }
-                solverCamBusy = true;
 
-                // Position camera first, then execute move
-                lockCameraToEmpty(empty, 1);
-                
-                // Use requestAnimationFrame to ensure camera is updated before move
-                requestAnimationFrame(() => {
-                    if (move.type === 'rotate') {
-                        doAnimatedRotation(move.row, move.steps, () => {
-                            solverCamBusy = false;
-                            resolve();
-                        }, empty);
-                    } else {
-                        doAnimatedBallMove(move.fromR, move.fromC, move.toR, move.toC, () => {
-                            solverCamBusy = false;
-                            resolve();
-                        }, empty);
-                    }
-                });
+                console.log(
+                    `[ANIM-MOVE] type=${move.type}` +
+                    (move.type === 'rotate' ? ` row=${move.row} steps=${move.steps}` : ` from=(${move.fromR},${move.fromC}) to=(${move.toR},${move.toC})`) +
+                    ` | empty before: row=${empty.row} col=${empty.col} angle=${(empty.angle * 180 / Math.PI).toFixed(1)}°`
+                );
+
+                const onDone = () => {
+                    alignPuzzleToCameraAfterTurn(() => { resolve(); });
+                };
+
+                if (move.type === 'rotate') {
+                    doAnimatedRotation(move.row, move.steps, onDone, empty);
+                } else {
+                    doAnimatedBallMove(move.fromR, move.fromC, move.toR, move.toC, onDone, empty);
+                }
             });
         }
 
         // Animate ball sliding straight up or down into the empty hole
         function doAnimatedBallMove(fr, fc, tr, tc, callback, emptyBefore) {
+            console.log(`[BALL-MOVE] from=(${fr},${fc}) to=(${tr},${tc}) | emptyBefore: row=${emptyBefore?.row} col=${emptyBefore?.col} angle=${emptyBefore ? (emptyBefore.angle * 180 / Math.PI).toFixed(1) + '°' : 'N/A'}`);
             const ball = grid[fr][fc];
-            if (!ball) { callback(); return; }
-            if (grid[tr][tc] !== null) { callback(); return; }
+            if (!ball) { console.warn('[BALL-MOVE] no ball at source!'); callback(); return; }
+            if (grid[tr][tc] !== null) { console.warn('[BALL-MOVE] destination not empty!'); callback(); return; }
 
             // Force matrix updates so world positions are current
             scene.updateMatrixWorld(true);
@@ -1292,34 +1306,14 @@
             // Empty starts at destination row and ends at source row
             const duration = 400;
             const startT = performance.now();
-            
-            // Calculate the world angle of the column where the move happens
-            const moveAngle = worldAngle(fr, fc);
-            const nx = Math.cos(moveAngle);
-            const nz = Math.sin(moveAngle);
-            const targetR = CYL_R + 0.152;
-            
+
             (function tick(now) {
                 const t = Math.min(1, (now - startT) / duration);
                 const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-                
+
                 // Animate ball position
                 ball.position.set(verticalX, srcWorld.y + (dstWorld.y - srcWorld.y) * ease, verticalZ);
-                
-                // Track the empty slot - it moves from tr to fr as ball moves
-                const emptyY = ((ROWS - 1) / 2 - tr) + (((ROWS - 1) / 2 - fr) - ((ROWS - 1) / 2 - tr)) * ease;
-                const tx = nx * targetR;
-                const tz = nz * targetR;
-                
-                // Keep camera centered on the moving empty slot
-                orbit.target.set(tx, emptyY * RH, tz);
-                camera.position.set(
-                    tx + nx * solveCamDistance,
-                    emptyY * RH + solveCamYOffset,
-                    tz + nz * solveCamDistance
-                );
-                orbit.update();
-                
+
                 if (t < 1) {
                     requestAnimationFrame(tick);
                 } else {
@@ -1341,27 +1335,15 @@
             const duration = 300;
             const startT = performance.now();
 
-            // If empty slot is on this layer, track it as the layer rotates
-            const emptyOnThisLayer = emptyBefore && emptyBefore.row === row;
-            
-            // If empty is on a different layer, keep camera fixed on it
-            const emptyOnOtherLayer = emptyBefore && emptyBefore.row !== row;
+            console.log(
+                `[ROTATION] row=${row} steps=${steps} startRot=${(startRot * 180 / Math.PI).toFixed(1)}° endRot=${(endRot * 180 / Math.PI).toFixed(1)}°` +
+                ` | emptyBefore: row=${emptyBefore?.row} col=${emptyBefore?.col} angle=${emptyBefore ? (emptyBefore.angle * 180 / Math.PI).toFixed(1) + '°' : 'N/A'}`
+            );
 
             (function tick(now) {
                 const t = Math.min(1, (now - startT) / duration);
                 const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
                 layer.rotation.y = startRot + (endRot - startRot) * ease;
-
-                // Keep empty slot centered in camera view
-                if (emptyOnThisLayer) {
-                    // Empty moves with the layer - calculate its new world angle
-                    const newEmptyAngle = emptyBefore.col * AS + layer.rotation.y;
-                    const normalizedAngle = ((newEmptyAngle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-                    lockCameraToEmpty({ angle: normalizedAngle, row }, 1);
-                } else if (emptyOnOtherLayer) {
-                    // Empty stays fixed - just keep camera on it
-                    lockCameraToEmpty(emptyBefore, 1);
-                }
 
                 if (t < 1) {
                     requestAnimationFrame(tick);
