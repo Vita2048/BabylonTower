@@ -208,8 +208,8 @@
                 <input id="setup-columns" type="number" min="5" max="10" value="5">
             </div>
             <div class="setup-row">
-                <label for="setup-rows">Rows (7-10)</label>
-                <input id="setup-rows" type="number" min="7" max="10" value="7">
+                <label for="setup-rows">Rows (6-10)</label>
+                <input id="setup-rows" type="number" min="6" max="10" value="7">
             </div>
             <div id="setup-actions">
                 <button onclick="closeSetup()">Cancel</button>
@@ -245,7 +245,7 @@
             0x8ccf35  // Lime
         ];
         let SLOTS = 5;              // columns
-        let ROWS = 7;               // total rows (top layers + 1 bottom row)
+        let ROWS = 6;               // total rows (top layers + 1 bottom row)
         let LAYERS = ROWS - 1;      // top rotating layers
         let TOTAL_HOLES = LAYERS * SLOTS + 1;
         let TOTAL_BALLS = LAYERS * SLOTS;
@@ -915,7 +915,7 @@
             const colInput = document.getElementById('setup-columns');
             const rowInput = document.getElementById('setup-rows');
             const cols = Math.max(5, Math.min(10, Number(colInput.value) || 5));
-            const rows = Math.max(7, Math.min(10, Number(rowInput.value) || 7));
+            const rows = Math.max(6, Math.min(10, Number(rowInput.value) || 7));
             colInput.value = String(cols);
             rowInput.value = String(rows);
 
@@ -1108,9 +1108,9 @@
             };
         }
 
-        /* ════════════════════════════════════════════════════
-           LAYER-BY-LAYER SOLVER
-           ════════════════════════════════════════════════════ */
+        /* ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+           LAYER-BY-LAYER SOLVER (Beam Search)
+           ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ */
 
         // Generate moves respecting locked rows (cannot rotate locked rows)
         function wGenMovesLocked(w, lockedRows) {
@@ -1143,7 +1143,8 @@
             return true;
         }
 
-        // Choose best color-to-column assignment by maximizing already-placed balls.
+        // Choose best colorΓåÆcolumn assignment by finding the permutation
+        // that maximizes already-placed balls
         function chooseBestAssignment(w) {
             const count = Array.from({ length: SLOTS }, () => new Array(SLOTS).fill(0));
             for (let r = 0; r < LAYERS; r++)
@@ -1151,54 +1152,82 @@
                     const v = w[r][wc];
                     if (v >= 0) count[wc][v]++;
                 }
+            let bestPerm = null, bestScore = -1;
+            const p = Array.from({ length: SLOTS }, (_, i) => i);
 
-            // Max-weight bipartite matching via bitmask DP (works well up to 10 columns).
-            const n = SLOTS;
-            const size = 1 << n;
-            const NEG = -1e9;
-            const dp = new Int32Array(size);
-            const parentMask = new Int32Array(size);
-            const chosenColor = new Int16Array(size);
-            dp.fill(NEG);
-            parentMask.fill(-1);
-            chosenColor.fill(-1);
-            dp[0] = 0;
+            // For large SLOTS, full permutation is too slow (10! is huge).
+            // Use a greedy approach if SLOTS > 7, otherwise full search.
+            if (SLOTS > 7) {
+                // Greedy assignment
+                const usedColors = new Set();
+                const assignment = new Array(SLOTS).fill(-1);
+                // Sort columns by most populous color
+                const colCounts = [];
+                for (let c = 0; c < SLOTS; c++) {
+                    let bestC = -1, maxN = -1;
+                    for (let clr = 0; clr < SLOTS; clr++) {
+                        if (count[c][clr] > maxN) { maxN = count[c][clr]; bestC = clr; }
+                    }
+                    colCounts.push({ c, bestC, maxN });
+                }
+                colCounts.sort((a, b) => b.maxN - a.maxN);
 
-            for (let mask = 0; mask < size; mask++) {
-                if (dp[mask] === NEG) continue;
-
-                let wc = 0;
-                for (let m = mask; m; m &= (m - 1)) wc++;
-                if (wc >= n) continue;
-
-                for (let color = 0; color < n; color++) {
-                    if (mask & (1 << color)) continue;
-                    const nextMask = mask | (1 << color);
-                    const nextScore = dp[mask] + count[wc][color];
-                    if (nextScore > dp[nextMask]) {
-                        dp[nextMask] = nextScore;
-                        parentMask[nextMask] = mask;
-                        chosenColor[nextMask] = color;
+                for (const item of colCounts) {
+                    if (!usedColors.has(item.bestC)) {
+                        assignment[item.c] = item.bestC;
+                        usedColors.add(item.bestC);
+                    } else {
+                        // Find next best
+                        let found = false;
+                        // Sort colors for this column
+                        const sortedColors = count[item.c].map((n, i) => ({ i, n })).sort((a, b) => b.n - a.n);
+                        for (const sc of sortedColors) {
+                            if (!usedColors.has(sc.i)) {
+                                assignment[item.c] = sc.i;
+                                usedColors.add(sc.i);
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            // Assign any unused
+                            for (let i = 0; i < SLOTS; i++) {
+                                if (!usedColors.has(i)) {
+                                    assignment[item.c] = i;
+                                    usedColors.add(i);
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
+                return assignment;
             }
 
-            const assignment = new Array(n).fill(0);
-            let mask = size - 1;
-            for (let wc = n - 1; wc >= 0; wc--) {
-                assignment[wc] = chosenColor[mask];
-                mask = parentMask[mask];
-                if (mask < 0) break;
-            }
-            return assignment;
+            // Small SLOTS: full recursive permutation
+            (function go(l) {
+                if (l === SLOTS) {
+                    let s = 0;
+                    for (let i = 0; i < SLOTS; i++) s += count[i][p[i]];
+                    if (s > bestScore) { bestScore = s; bestPerm = p.slice(); }
+                    return;
+                }
+                for (let i = l; i < SLOTS; i++) {
+                    [p[l], p[i]] = [p[i], p[l]];
+                    go(l + 1);
+                    [p[l], p[i]] = [p[i], p[l]];
+                }
+            })(0);
+            return bestPerm;
         }
+
         // Beam search to achieve a specific sub-goal
         // goalFn(w) returns 0 when goal met, positive otherwise (heuristic distance)
         // Returns array of moves, or null if no path found
         function searchForGoal(w0, goalFn, lockedRows, timeBudget) {
             const tEnd = performance.now() + timeBudget;
-            const WIDTH = Math.min(6000, 1200 + SLOTS * LAYERS * 80);
-            const DEPTH = Math.max(40, 24 + LAYERS * 4);
+            const WIDTH = 2000;
+            const DEPTH = 60; // Increased depth for potentially complex moves
             const lockedSnap = w0;
 
             let beam = [{ w: w0, g: 0, h: goalFn(w0), moves: [], lastMove: null }];
@@ -1216,7 +1245,7 @@
                     for (const mv of moves) {
                         if (isInverseMove(mv, node.lastMove)) continue;
                         const w1 = wApply(node.w, mv);
-                        // Ensure locked rows not disturbed
+                        // Ensure locked rows not disturbed (double check, though genMoves shouldn't produce bad moves)
                         if (!lockedRowsIntact(w1, lockedSnap, lockedRows)) continue;
                         const key = wHash(w1);
                         if (seen.has(key)) continue;
@@ -1255,7 +1284,6 @@
         async function runSolver() {
             document.getElementById('solve-btn').textContent = 'Stop';
             snapAllRowsToGrid();
-            const budgetScale = Math.max(1, (SLOTS * LAYERS) / 30);
 
             let w = snapshotWorld();
             // Step 1: Choose target assignment
@@ -1270,7 +1298,6 @@
 
                 // For the last two rows, solve all remaining columns together
                 if (targetRow >= LAYERS - 2) {
-                    w = snapshotWorld();
                     const goalFn = (ws) => {
                         let cost = 0;
                         for (let r = targetRow; r < LAYERS; r++) {
@@ -1278,15 +1305,30 @@
                                 if (ws[r][wc] !== assignment[wc]) cost++;
                             }
                         }
-                        // Penalize empty not at bottom
+                        // Penalize empty not at bottom (elevator position)
+                        // Ideally empty should be at bottom row
                         if (ws[ROWS - 1][0] >= 0) cost += 2;
                         return cost;
                     };
 
-                    const moves = searchForGoal(w, goalFn, lockedRows, Math.round(10000 * budgetScale));
-                    if (moves && moves.length > 0) {
-                        if (!(await executeMoves(moves))) { stopSolve(); return; }
-                        totalMoves += moves.length;
+                    // Retry loop for the tricky bottom section
+                    let attempts = 0;
+                    while (attempts < 5) {
+                        w = snapshotWorld();
+                        if (goalFn(w) === 0) break; // Fully solved
+
+                        // Increase time budget with each retry
+                        const moves = searchForGoal(w, goalFn, lockedRows, 15000 + attempts * 5000);
+                        if (moves && moves.length > 0) {
+                            if (!(await executeMoves(moves))) { stopSolve(); return; }
+                            totalMoves += moves.length;
+                        } else {
+                            // If search fails to find any moves, we might be stuck. 
+                            // But usually Beam Search returns *something* if it can't find goal.
+                            // If it returns null, it explored everything it could within limits.
+                            break;
+                        }
+                        attempts++;
                     }
                     break;
                 }
@@ -1331,7 +1373,7 @@
                         return cost;
                     };
 
-                    const moves = searchForGoal(w, goalFn, lockedRows, Math.round(5000 * budgetScale));
+                    const moves = searchForGoal(w, goalFn, lockedRows, 5000);
                     if (moves && moves.length > 0) {
                         if (!(await executeMoves(moves))) { stopSolve(); return; }
                         totalMoves += moves.length;
@@ -1339,7 +1381,7 @@
                         // Try with more time
                         snapAllRowsToGrid();
                         w = snapshotWorld();
-                        const moves2 = searchForGoal(w, goalFn, lockedRows, Math.round(15000 * budgetScale));
+                        const moves2 = searchForGoal(w, goalFn, lockedRows, 15000);
                         if (moves2 && moves2.length > 0) {
                             if (!(await executeMoves(moves2))) { stopSolve(); return; }
                             totalMoves += moves2.length;
@@ -1362,54 +1404,9 @@
                 }
             }
 
-            // Final cleanup pass for larger boards: solve any remaining mismatches globally.
-            snapAllRowsToGrid();
-            w = snapshotWorld();
-            if (!solveAbort && !wIsSolved(w)) {
-                const globalGoalFn = (ws) => {
-                    let cost = 0;
-                    if (ws[ROWS - 1][0] >= 0) cost += 4;
-                    for (let wc = 0; wc < SLOTS; wc++) {
-                        const top = ws[0][wc];
-                        if (top < 0) { cost += 3; continue; }
-                        for (let r = 1; r < LAYERS; r++) {
-                            if (ws[r][wc] !== top) cost++;
-                        }
-                    }
-                    return cost;
-                };
-
-                for (const baseBudget of [12000, 24000, 36000]) {
-                    if (solveAbort) { stopSolve(); return; }
-                    snapAllRowsToGrid();
-                    w = snapshotWorld();
-                    if (wIsSolved(w)) break;
-
-                    const moves = searchForGoal(
-                        w,
-                        globalGoalFn,
-                        new Set(),
-                        Math.round(baseBudget * budgetScale)
-                    );
-                    if (moves && moves.length > 0) {
-                        if (!(await executeMoves(moves))) { stopSolve(); return; }
-                        totalMoves += moves.length;
-                    }
-                }
-            }
-
+            // Final check
             snapAllRowsToGrid();
             checkWin();
-            if (!solveAbort && gameOn) {
-                document.getElementById('hint').textContent =
-                    'Solver stopped before full solution. Press Solve again or New Game.';
-                setTimeout(() => {
-                    if (gameOn) {
-                        document.getElementById('hint').innerHTML =
-                            'Drag layers to rotate &bull; Click balls to move into empty slot';
-                    }
-                }, 3000);
-            }
             stopSolve();
         }
 
@@ -1530,4 +1527,3 @@
 </body>
 
 </html>
-
